@@ -1,0 +1,53 @@
+# common
+model_name: VBD
+ckpt_path: "/data_set/UniTraj/unitraj/outputs/VBD_merge/epoch=14.ckpt"
+anchor_path: /home/mj/VBD/vbd/data/cluster_64_center_dict.pkl
+
+
+# Wandb Config
+use_wandb: False
+username: 1346037269-
+project: VBD
+
+# train
+max_epochs: 16
+learning_rate_sched: [ 10, 20, 30, 40, 50 ]
+optimizer: AdamW #According to PyTorch naming
+scheduler: multistep # plateau, multistep
+ewc_lambda: 2000
+grad_clip_norm: 5
+train_batch_size: 2
+eval_batch_size: 1
+
+# Checkpoint Config
+init_from: null
+
+# Model Config
+agents_len: 16 #32
+future_len: 80
+action_len: 2
+encoder_layers: 6
+prediction_type: sample
+encoder_version: v2
+
+# Diffusion Params
+diffusion_steps: 50
+schedule_type: cosine
+schedule_s: 0
+schedule_e: 1
+schedule_tau: 1
+
+action_mean: [0.0, 0.0]
+action_std: [1.0, 0.15]
+clamp_value: 5.0
+
+# Training Params
+lr: 0.0002
+weight_decay: 0.01
+lr_warmup_step: 1000
+lr_step_freq: 1000
+lr_step_gamma: 0.98
+
+train_encoder: True
+train_denoiser: True
+train_predictor: True

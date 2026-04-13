@@ -14,12 +14,12 @@ from tqdm import tqdm
 from unitraj.datasets import common_utils
 from unitraj.datasets.common_utils import get_polyline_dir, find_true_segments, generate_mask, is_ddp, \
     get_kalman_difficulty, get_trajectory_type, interpolate_polyline
-from unitraj.datasets.types import object_type, polyline_type
+from unitraj.datasets.my_types import object_type, polyline_type
 from unitraj.utils.visualization import check_loaded_data
 from functools import lru_cache
 
 default_value = 0
-object_type = defaultdict(lambda: default_value, object_type)
+objeobject_typect_type = defaultdict(lambda: default_value, object_type)
 polyline_type = defaultdict(lambda: default_value, polyline_type)
 
 
@@ -1092,4 +1092,4 @@ if __name__ == '__main__':
     from unitraj.utils.visualization import concatenate_varying
 
     split_data()
-    # draw_figures()
+    draw_figures()

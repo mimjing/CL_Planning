@@ -1,5 +1,11 @@
 # common
 model_name: wayformer
+ckpt_path: "/data_set/UniTraj/unitraj/outputs/wayformer/brier_fde=1.45.ckpt"
+
+# Wandb Config
+use_wandb: False
+username: 1346037269-
+project: unitraj
 
 # model
 use_map_image: False

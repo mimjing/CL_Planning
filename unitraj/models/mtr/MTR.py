@@ -55,6 +55,8 @@ class MotionTransformer(BaseModel):
             output['predicted_probability'] = out_dict['pred_scores']  # #[B, c]
             output['predicted_trajectory'] = out_dict['pred_trajs']  # [B, c, T, 5] to be able to parallelize code
 
+        if self.closeloop:
+            return output
         loss, tb_dict, disp_dict = self.motion_decoder.get_loss()
         return output, loss
 
@@ -445,7 +447,7 @@ class MTRDecoder(nn.Module):
             raise NotImplementedError
         else:
             intention_points = torch.stack([
-                self.intention_points[Type_dict[center_objects_type[obj_idx]]]
+                self.intention_points[Type_dict[center_objects_type[obj_idx].item()]]
                 for obj_idx in range(num_center_objects)], dim=0).cuda()
             intention_points = intention_points.permute(1, 0, 2)  # (num_query, num_center_objects, 2)
 

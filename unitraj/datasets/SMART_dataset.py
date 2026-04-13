@@ -26,7 +26,7 @@ from unitraj.datasets.common_utils import (
     load_item,
 )
 from unitraj.models.smart.smart_utils import wrap_angle
-from unitraj.datasets.types import (
+from unitraj.datasets.my_types import (
     object_type,
     polyline_type,
     smart_polygon_type,

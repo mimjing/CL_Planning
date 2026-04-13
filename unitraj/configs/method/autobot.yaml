@@ -1,5 +1,6 @@
 # common
 model_name: autobot
+ckpt_path: "/data_set/UniTraj/unitraj/outputs/autobot_waymo/brier_fde=2.11.ckpt"
 num_modes: 6
 hidden_size: 128
 num_encoder_layers: 2
@@ -10,6 +11,11 @@ dropout: 0.1
 entropy_weight: 40.0
 kl_weight: 20.0
 use_FDEADE_aux_loss: True
+
+# Wandb Config
+use_wandb: True
+username: 1346037269-
+project: autobot
 
 # train
 max_epochs: 100 #150 #40

@@ -2,6 +2,11 @@
 # common
 model_name: SMART
 
+# Wandb Config
+use_wandb: False
+username: 1346037269-
+project: SMART
+
 time_info: &time_info
   num_historical_steps: 11
   num_future_steps: 80

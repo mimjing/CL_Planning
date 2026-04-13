@@ -12,7 +12,7 @@ from unitraj.models.smart.layers.attention_layer import AttentionLayer
 from unitraj.models.smart.layers import MLPLayer
 from unitraj.models.smart.layers.fourier_embedding import FourierEmbedding, MLPEmbedding
 from typing import Dict, Mapping, Optional
-from torch_cluster import radius, radius_graph
+# from torch_cluster import radius, radius_graph
 from torch_geometric.data import Batch, HeteroData
 from torch_geometric.utils import dense_to_sparse, subgraph
 from unitraj.models.smart.smart_utils import (

@@ -256,7 +256,7 @@ def concatenate_varying(image_list, column_counts):
     return final_image
 
 
-def visualize_prediction(batch, prediction, draw_index=0):
+def visualize_prediction(batch, prediction, draw_index=1):
     def draw_line_with_mask(point1, point2, color, line_width=4):
         ax.plot([point1[0], point2[0]], [point1[1], point2[1]], linewidth=line_width, color=color)
 
@@ -322,5 +322,5 @@ def visualize_prediction(batch, prediction, draw_index=0):
         color = cm.hot(pred_future_prob[idx])
         for i in range(len(traj) - 1):
             draw_line_with_mask(traj[i], traj[i + 1], color=color, line_width=2)
-
+    plt.show()
     return plt

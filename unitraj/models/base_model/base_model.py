@@ -1,7 +1,7 @@
 import json
 
 import numpy as np
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import torch
 import wandb
 
@@ -19,6 +19,8 @@ class BaseModel(pl.LightningModule):
 
         if config.get('eval_nuscenes', False):
             self.init_nuscenes()
+
+        self.closeloop = config.get('closeloop_mode', False)
 
     def init_nuscenes(self):
         if self.config.get('eval_nuscenes', False):

@@ -59,7 +59,7 @@ class MultiheadAttention(nn.Module):
     bias_v: Optional[torch.Tensor]
 
     def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False,
-                 kdim=None, vdim=None, batch_first=False, device=None, dtype=None, without_weight=False) -> None:
+                 kdim=None, vdim=None, batch_first=True, device=None, dtype=None, without_weight=False) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super(MultiheadAttention, self).__init__()
         self.embed_dim = embed_dim
@@ -169,6 +169,10 @@ class MultiheadAttention(nn.Module):
         """
         if self.batch_first:
             query, key, value = [x.transpose(1, 0) for x in (query, key, value)]
+
+        if key_padding_mask is not None and key_padding_mask.shape[0] == 1:
+            key_padding_mask = key_padding_mask.transpose(0, 1)
+            # print("MTR模型有问题：key_padding_mask的第0维度为1，已自动转置。请检查输入数据。")
 
         if not self._qkv_same_embed_dim:
             attn_output, attn_output_weights = multi_head_attention_forward(

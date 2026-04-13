@@ -368,6 +368,8 @@ class AutoBotEgo(BaseModel):
         model_input['agents_in'] = agents_in
         model_input['roads'] = roads
         output = self._forward(model_input)
+        if self.closeloop:
+            return output
         loss = self.get_loss(batch, output)
         # if self.training:
         #     loss = self.get_loss(batch, output)
@@ -385,8 +387,7 @@ class AutoBotEgo(BaseModel):
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.config['learning_rate'], eps=0.0001)
-        scheduler = MultiStepLR(optimizer, milestones=self.config['learning_rate_sched'], gamma=0.5,
-                                verbose=True)
+        scheduler = MultiStepLR(optimizer, milestones=self.config['learning_rate_sched'], gamma=0.5)
         return [optimizer], [scheduler]
 
 

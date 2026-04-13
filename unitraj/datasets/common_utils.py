@@ -187,6 +187,8 @@ def generate_mask(current_index, total_length, interval):
 
 
 def find_true_segments(mask):
+    if mask.size == 0:
+        return []
     # Find the indices where `True` changes to `False` and vice versa
     change_points = np.where(np.diff(mask))[0] + 1
 
@@ -394,7 +396,7 @@ class TrajectoryType:
 
 def classify_track(start_point, end_point, start_velocity, end_velocity, start_heading, end_heading):
     # The classification strategy is taken from
-    # waymo_open_dataset/metrics/motion_metrics_utils.cc#L28
+    # waymo_open_dataset/metrics_before/motion_metrics_utils.cc#L28
 
     # Parameters for classification, taken from WOD
     kMaxSpeedForStationary = 2.0  # (m/s)
@@ -470,6 +472,10 @@ def get_trajectory_type(output):
     for data_sample in output:
         # Get last gt position, velocity and heading
         valid_end_point = int(data_sample["center_gt_final_valid_idx"])
+        # 如果未来轨迹完全无效，跳过
+        if valid_end_point < 0 or valid_end_point == 0:
+            data_sample["trajectory_type"] = -1
+            continue
         end_point = data_sample["obj_trajs_future_state"][0, valid_end_point, :2]  # (x,y)
         end_velocity = data_sample["obj_trajs_future_state"][0, valid_end_point, 2:]  # (vx, vy)
         # Get last heading, manually approximate it from the series of future position

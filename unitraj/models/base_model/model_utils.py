@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch_lightning.callbacks import Callback
+from lightning.pytorch.callbacks import Callback
 from torch import nn
 from tqdm import tqdm
 from typing_extensions import Protocol
@@ -216,7 +216,7 @@ class SmartSamplerCallback(Callback):
             #         #cos_sim = cosine_similarity(grad_norm, fisher_norm)
             #         euc_dist = euclidean_distance(grad_norm, fisher_norm)
             #
-            #         # Combining metrics (example: simple average)
+            #         # Combining metrics_before (example: simple average)
             #         #gap = (cos_sim + euc_dist) / 2
             #         gaps.append(euc_dist)
 
@@ -264,10 +264,10 @@ class SmartSamplerCallback(Callback):
 
         metrics = metrics * 5
         metrics = F.softmax(metrics, dim=0)
-        # metrics is the sample weight
+        # metrics_before is the sample weight
         sampled_idx = torch.multinomial(metrics, sample_num, replacement=False)
 
-        # _, sorted_idx = torch.sort(metrics, descending=True)
+        # _, sorted_idx = torch.sort(metrics_before, descending=True)
         # sorted_idx = idx[sorted_idx]
         # get sample_num evenly spaced indices
         # sample_idx = np.linspace(0, len(sorted_idx)-1, sample_num).astype(int)

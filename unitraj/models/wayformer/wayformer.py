@@ -6,6 +6,7 @@ from torch import optim
 
 from unitraj.models.base_model.base_model import BaseModel
 from .wayformer_utils import PerceiverEncoder, PerceiverDecoder, TrainableQueryProvider
+from ...utils.visualization import visualize_prediction
 
 
 def init(module, weight_init, bias_init, gain=1):
@@ -177,11 +178,17 @@ class Wayformer(BaseModel):
         model_input['roads'] = roads
         output = self._forward(model_input)
 
+        # 新增绘制轨迹
+        # visualize_prediction(batch, output)
+
+
+        output['dataset_name'] = inputs['dataset_name']
+        output['predicted_probability'] = F.softmax(output['predicted_probability'], dim=-1)
+        if self.closeloop :
+            return output
         ground_truth = torch.cat([inputs['center_gt_trajs'][..., :2], inputs['center_gt_trajs_mask'].unsqueeze(-1)],
                                  dim=-1)
         loss = self.criterion(output, ground_truth, inputs['center_gt_final_valid_idx'])
-        output['dataset_name'] = inputs['dataset_name']
-        output['predicted_probability'] = F.softmax(output['predicted_probability'], dim=-1)
         return output, loss
 
     def configure_optimizers(self):

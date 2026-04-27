@@ -17,6 +17,7 @@ from unitraj.datasets.common_utils import get_polyline_dir, find_true_segments, 
 from unitraj.datasets.my_types import object_type, polyline_type
 from unitraj.utils.visualization import check_loaded_data
 from functools import lru_cache
+import traceback
 
 default_value = 0
 objeobject_typect_type = defaultdict(lambda: default_value, object_type)
@@ -62,6 +63,7 @@ class BaseDataset(Dataset):
                     if os.path.exists(self.cache_path):
                         shutil.rmtree(self.cache_path)
                     os.makedirs(self.cache_path, exist_ok=True)
+                    # process_num = 1
                     process_num = os.cpu_count()//2
                     print('Using {} processes to load data...'.format(process_num))
 
@@ -113,6 +115,8 @@ class BaseDataset(Dataset):
         data_path, mapping, data_list, dataset_name = data_chunk
         hdf5_path = os.path.join(self.cache_path, f'{worker_index}.h5')
 
+        debug = bool(self.config.get('debug', False))
+
         with h5py.File(hdf5_path, 'w') as f:
             for cnt, file_name in enumerate(data_list):
                 if worker_index == 0 and cnt % max(int(len(data_list) / 10), 1) == 0:
@@ -128,6 +132,8 @@ class BaseDataset(Dataset):
 
                 except Exception as e:
                     print('Warning: {} in {}'.format(e, file_name))
+                    if debug:
+                        traceback.print_exc()
                     output = None
 
                 if output is None: continue
@@ -146,6 +152,7 @@ class BaseDataset(Dataset):
                     file_list[grp_name] = file_info
                 del scenario
                 del output
+
 
         return file_list
 
@@ -309,7 +316,7 @@ class BaseDataset(Dataset):
         }
         ret.update(scenario['metadata'])
         ret['timestamps_seconds'] = ret.pop('ts')
-        ret['current_time_index'] = self.config['past_len'] - 1
+        ret['current_time_index'] = self.config['past_len'] - 1 # 21-1
         ret['sdc_track_index'] = track_infos['object_id'].index(ret['sdc_id'])
 
         if self.config['only_train_on_ego']:
@@ -358,8 +365,8 @@ class BaseDataset(Dataset):
         track_index_to_predict = np.array(info['tracks_to_predict']['track_index'])
         obj_types = np.array(track_infos['object_type'])
         obj_trajs_full = track_infos['trajs']  # (num_objects, num_timestamp, 10)
-        obj_trajs_past = obj_trajs_full[:, :current_time_index + 1]
-        obj_trajs_future = obj_trajs_full[:, current_time_index + 1:]
+        obj_trajs_past = obj_trajs_full[:, :current_time_index + 1] # ：21
+        obj_trajs_future = obj_trajs_full[:, current_time_index + 1:] # 21：
 
         center_objects, track_index_to_predict = self.get_interested_agents(
             track_index_to_predict=track_index_to_predict,

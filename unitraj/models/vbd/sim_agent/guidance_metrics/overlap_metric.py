@@ -10,23 +10,34 @@ from torch.autograd import Function
 
 def corners_from_bboxes(pose_5dof):
     """
-    pose_5dof: (N, 5)  [x, y, length, width, yaw]
-    return:    (N, 4, 2) 4 corners counter-clockwise
+    Build oriented 2D bbox corners.
+
+    Args:
+        pose_5dof: array-like with shape (..., 5) where last dim is
+            [x, y, length, width, yaw]. Supports extra leading dims (e.g. B,A,T,5).
+
+    Returns:
+        corners: jnp.ndarray with shape (..., 4, 2) in counter-clockwise order.
     """
-    x, y, l, w, yaw = pose_5dof[:, 0], pose_5dof[:, 1], pose_5dof[:, 2], pose_5dof[:, 3], pose_5dof[:, 4]
+    pose_5dof = jnp.asarray(pose_5dof)
+    x, y = pose_5dof[..., 0], pose_5dof[..., 1]
+    l, w, yaw = pose_5dof[..., 2], pose_5dof[..., 3], pose_5dof[..., 4]
+
     cos, sin = jnp.cos(yaw), jnp.sin(yaw)
+    hl, hw = 0.5 * l, 0.5 * w
 
-    dx = 0.5 * l * cos - 0.5 * w * sin
-    dy = 0.5 * l * sin + 0.5 * w * cos
+    # Local corner offsets (vehicle frame): (+l/2,+w/2), (+l/2,-w/2), (-l/2,-w/2), (-l/2,+w/2)
+    # Rotate by yaw into world frame.
+    dx = jnp.stack(
+        [hl * cos - hw * sin, hl * cos + hw * sin, -hl * cos + hw * sin, -hl * cos - hw * sin],
+        axis=-1,
+    )  # (..., 4)
+    dy = jnp.stack(
+        [hl * sin + hw * cos, hl * sin - hw * cos, -hl * sin - hw * cos, -hl * sin + hw * cos],
+        axis=-1,
+    )  # (..., 4)
 
-    # 4 个相对角点
-    rel_corners = jnp.array([[dx, dy],
-                             [dx, -dy],
-                             [-dx, -dy],
-                             [-dx, dy]])  # (4,2)
-
-    # 广播到 (N,4,2) 再加中心
-    corners = rel_corners[None, :, :] + pose_5dof[:, None, :2]
+    corners = jnp.stack([x[..., None] + dx, y[..., None] + dy], axis=-1)  # (..., 4, 2)
     return corners
 
 class OverlapReward(nn.Module): # 自行改动版

@@ -14,7 +14,7 @@ def make_cuda_ext(name, module, sources):
 
 if __name__ == '__main__':
     setup(
-        name='UniTraj',
+        name='UniTraj_benchmark',
         version=1.0,
         description='A Unified Framework for Scalable Vehicle Trajectory Prediction',
         author='Lan Feng',

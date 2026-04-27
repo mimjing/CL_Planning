@@ -1,8 +1,7 @@
 import time
 import torch
-from omegaconf import DictConfig
 
-from unitraj.datasets.VBD_test_dataset import VBDTestDataset
+from unitraj.datasets.VBD_dataset.VBD_test_dataset import VBDTestDataset
 from unitraj.models.vbd.sim_agent.sim_actor import VBDTest
 
 ## Parameters
@@ -12,7 +11,7 @@ N_SIMULATION_STEPS = 80
 
 dataset = VBDTestDataset(
     data_dir= None,
-    anchor_path='/home/mj/VBD/vbd/data/new_cluster_64_center_dict.pkl',
+    anchor_path='/data_set/VBD/vbd/data/new_cluster_64_center_dict.pkl',
     max_object=N_SIM_AGENTS,
 )
 

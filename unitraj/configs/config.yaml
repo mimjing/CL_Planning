@@ -2,18 +2,19 @@
 exp_name: "wayformer-nuplan"
 
 defaults:
-- method: wayformer # wayformer, autobot, MTR, VBD
+- method: Pluto # wayformer, autobot, MTR, VBD, Pluto
 closeloop_mode: true # whether to evaluate in closeloop_simulation mode
 
 seed: 0 # random seed
-debug: true # debug mode, will use cpu only-
+debug: true # debug mode
+debug_clean_cache_on_fail: true
 devices: [0]   # gpu ids
 
 # data related
-load_num_workers: 16 # number of workers for loading data
-train_data_path: ["/media/mj/EXTERNAL_USB/data/Dataset/Waymo/waymo_convert/waymo_convert_0"]   # list of paths to the training data
-val_data_path: ["/data_set/UniTraj/unitraj/data_samples/nuscenes"]   # list of paths to the validation data
-eval_data_path: "/data_set/UniTraj/unitraj/eval/real"
+load_num_workers: 1 # number of workers for loading data
+train_data_path: ["/media/mj/EXTERNAL_USB/nuPlan_SD/mini_convert/mini_convert_0"]   # list of paths to the training data
+val_data_path: ["/media/mj/EXTERNAL_USB/nuPlan_SD/mini_convert/mini_convert_1"]   # list of paths to the validation data
+eval_data_path: "/media/mj/EXTERNAL_USB/nuPlan_SD/mini_convert/mini_convert_2"
 cache_path: "./cache"
 max_data_num: [null]   # maximum number of data for each training dataset, null means all data
 starting_frame: [0]   # history trajectory starts at this frame for each training dataset

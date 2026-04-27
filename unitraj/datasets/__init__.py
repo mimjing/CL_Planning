@@ -1,8 +1,9 @@
 from .MTR_dataset import MTRDataset
 from .autobot_dataset import AutoBotDataset
-from .VBD_dataset import VBDDataset
+from unitraj.datasets.VBD_dataset.VBD_dataset import VBDDataset
 from .wayformer_dataset import WayformerDataset
 from .SMART_dataset import SMARTDataset
+from unitraj.datasets.Pluto_dataset.Pluto_dataset import PlutoDataset
 
 __all__ = {
     'autobot': AutoBotDataset,
@@ -10,6 +11,7 @@ __all__ = {
     'MTR': MTRDataset,
     'SMART': SMARTDataset,
     'VBD': VBDDataset,
+    'Pluto': PlutoDataset,
 }
 
 

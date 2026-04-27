@@ -468,7 +468,7 @@ class TopDownRenderer:
         return frame_objects
 
 
-    def draw_plan_traj(self, traj, color_set='rainbow'):
+    def draw_plan_traj(self, traj, color_set='rainbow', explicit_color=None):
         """
         绘制传入的轨迹。
         """
@@ -476,16 +476,20 @@ class TopDownRenderer:
         for i in range(plan_traj.shape[1]):
             pos = self._frame_canvas.pos2pix(plan_traj[0, i], plan_traj[1, i])
             radius = 4  # 调整圆的半径
-            # 每个颜色组件增加亮度
-            brightness_increase = 30
-            color = (0, 0, 255)
-            if color_set == 'rainbow':
-                r = int(np.clip(255 - i * 5 + brightness_increase, 0, 255))
-                g = int(np.clip(50 + i * 5 + brightness_increase, 0, 255))
-                b = int(np.clip(50 + brightness_increase, 0, 255))
-                color = (r, g, b)
-            elif color == 'blue':
-                color = (255, 0, 0)
+            if explicit_color is not None:
+                color = explicit_color
+                radius = 2  # Make candidate trajectories smaller
+            else:
+                # 每个颜色组件增加亮度
+                brightness_increase = 30
+                color = (0, 0, 255)
+                if color_set == 'rainbow':
+                    r = int(np.clip(255 - i * 5 + brightness_increase, 0, 255))
+                    g = int(np.clip(50 + i * 5 + brightness_increase, 0, 255))
+                    b = int(np.clip(50 + brightness_increase, 0, 255))
+                    color = (r, g, b)
+                elif color_set == 'blue':
+                    color = (255, 0, 0)
 
             pygame.draw.circle(
                 surface=self._frame_canvas,
@@ -824,6 +828,11 @@ class TopDownRenderer:
 
         if self.show_plan_traj and hasattr(v, 'plan_traj'):
             self.draw_plan_traj(v.plan_traj)
+
+        if self.show_plan_traj and hasattr(v, 'candidate_trajectories'):
+            for idx in range(v.candidate_trajectories.shape[0]):
+                self.draw_plan_traj(v.candidate_trajectories[idx], color_set=None, explicit_color=(150, 150, 150))
+            self.draw_plan_traj(v.plan_traj) # Redraw best on top
 
         if self.show_plan_traj and hasattr(v, 'expert_traj'):
             self.draw_expert_traj(v.expert_traj)

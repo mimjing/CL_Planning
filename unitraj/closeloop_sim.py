@@ -1,3 +1,5 @@
+from copy import copy, deepcopy
+
 import sys
 import os
 import time
@@ -6,6 +8,7 @@ import traceback
 import yaml
 from tqdm import tqdm
 from unitraj.closeloop.VBD.vbd_policy import VBDPolicy
+from unitraj.closeloop.pluto.pluto_policy import PlutoPolicy
 from unitraj.closeloop.unitraj.unitraj_policy import UniTrajPolicy
 from metadrive.envs.scenario_env import ScenarioEnv
 
@@ -20,7 +23,7 @@ logging.getLogger("lightning_fabric.utilities.seed").setLevel(logging.WARNING)
 
 desc = "Load a database to simulator and replay scenarios"
 parser = argparse.ArgumentParser(description=desc)
-parser.add_argument("--file_path", default='/data_set/UniTraj/unitraj/configs/config.yaml', help="The class of the model")
+parser.add_argument("--file_path", default=os.path.join(os.path.dirname(__file__), "configs", "config.yaml"), help="The class of the model")
 parser.add_argument("--render", default="2D", choices=["none", "2D", "3D", "advanced", "semantic"])
 parser.add_argument("--max_step", default=80, type=int)
 parser.add_argument("--eval_eps", default=100, type=int)
@@ -35,6 +38,8 @@ if method in ['wayformer', 'autobot', 'MTR']:
     policy = UniTrajPolicy
 elif method == 'VBD':
     policy = VBDPolicy
+elif method == 'Pluto':
+    policy = PlutoPolicy
 
 def create_env():
     env = ScenarioEnv(
@@ -43,7 +48,7 @@ def create_env():
             "agent_policy": policy,
             "manual_control": False,
             "log_level": logging.CRITICAL,
-            "num_scenarios": 26,
+            "num_scenarios": 6,
             "sequential_seed": False,
             "start_scenario_index": 0,
             "horizon": 80,
@@ -74,12 +79,12 @@ if __name__ == '__main__':
 
     pbar = tqdm(range(args.eval_eps), desc="Eval eps", unit="ep")
     t1 = time.time()
-    try:
-        for i_ep in pbar:
-
+    
+    for i_ep in pbar:
+        try:
             eval_env.reset()
 
-            scenario = eval_env.engine.data_manager.current_scenario
+            scenario = deepcopy(eval_env.engine.data_manager.current_scenario)
             sdc_id = scenario['metadata']['sdc_id']
             # if scenario['id'] in used_ids or scenario['length'] < 81 or scenario['metadata']['object_summary'][sdc_id][
             #     'moving_distance'] < 10:
@@ -89,6 +94,7 @@ if __name__ == '__main__':
             # used_ids.add(scenario['id'])
 
             eval_env.head_renderer = HeadTopDownRenderer(eval_env)
+            eval_env.engine.head_renderer = eval_env.head_renderer
             i_step = 0
             eps_reward = 0
             num_epoch += 1
@@ -138,16 +144,17 @@ if __name__ == '__main__':
 
                     pbar.set_postfix({'success_rate': f"{success_rate:.3f}"})
                     break
+        except (KeyboardInterrupt, Exception) as e:
+            print('! ! ! ! ! ! ! ! !')
+            print(f'场景 {i_ep} 运行时出错：', e)
+            traceback.print_exc()
+            logging.exception("Exception in evaluation loop")
+            continue
+            
+    try:
         info_eval = {'mean_reward_all': mean_reward_all, 'success_rate': success_rate}
         evaluate.print_metrics(info_eval, file_name=cfg['exp_name'])
         t2 = time.time()
         print('耗时：', t2-t1)
-    except (KeyboardInterrupt, Exception) as e:
-        print('! ! ! ! ! ! ! ! !')
-        print('运行时出错：', e)
-        traceback.print_exc()
-        logging.exception("Exception in evaluation loop")
-        info_eval = {'mean_reward_all': mean_reward_all, 'success_rate': success_rate}
-        evaluate.print_metrics(info_eval, file_name=cfg['exp_name'])
-        t2 = time.time()
-        print('耗时：', t2 - t1)
+    except Exception as e:
+        print("打印结果时出错:", e)

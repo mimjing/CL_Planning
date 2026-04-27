@@ -15,6 +15,24 @@ default_value = 0
 object_type = defaultdict(lambda: default_value, object_type)
 polyline_type = defaultdict(lambda: default_value, polyline_type)
 
+
+def create_batch_dict(ret_list):
+    """Create batch dictionary from list of processed data."""
+    batch_size = len(ret_list)
+    key_to_list = {}
+    for key in ret_list[0].keys():
+        key_to_list[key] = [ret_list[bs_idx][key] for bs_idx in range(batch_size)]
+
+    input_dict = {}
+    for key, val_list in key_to_list.items():
+        try:
+            input_dict[key] = torch.from_numpy(np.stack(val_list, axis=0))
+        except:
+            input_dict[key] = val_list
+
+    return {'batch_size': batch_size, 'input_dict': input_dict, 'batch_sample_count': batch_size}
+
+
 class UnitrajTestDataset(Dataset):
     def __init__(self, cfg):
         self.global_cfg = cfg
@@ -24,7 +42,7 @@ class UnitrajTestDataset(Dataset):
         info = self.process_scenario_data(scenario, current_step)
         t2 = time.time()
         ret_list = self.prepare_agent_and_map_data(info)
-        batch_dict = self.create_batch_dict(ret_list)
+        batch_dict = create_batch_dict(ret_list)
 
         return batch_dict, self.center_objects
 
@@ -367,19 +385,3 @@ class UnitrajTestDataset(Dataset):
             ret_dict['obj_trajs'][..., 27:29] = 0
         if 'heading' in masked_attributes:
             ret_dict['obj_trajs'][..., 23:25] = 0
-
-    def create_batch_dict(self, ret_list):
-        """Create batch dictionary from list of processed data."""
-        batch_size = len(ret_list)
-        key_to_list = {}
-        for key in ret_list[0].keys():
-            key_to_list[key] = [ret_list[bs_idx][key] for bs_idx in range(batch_size)]
-
-        input_dict = {}
-        for key, val_list in key_to_list.items():
-            try:
-                input_dict[key] = torch.from_numpy(np.stack(val_list, axis=0))
-            except:
-                input_dict[key] = val_list
-
-        return {'batch_size': batch_size, 'input_dict': input_dict, 'batch_sample_count': batch_size}

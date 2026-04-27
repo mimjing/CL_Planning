@@ -1,0 +1,86 @@
+# A new planner that inherits from the pluto planner and adds RIFT capabilities.
+# The class name is specified in the `_target_` field.
+#_target_: src.planners.rift_planner.RIFTPlanner
+#
+## Overwrite the following parameters from the pluto planner.
+## The name of the planner.
+#name: "RIFT Planner"
+#
+## RIFT specific config
+
+
+rift_planner:
+  _target_: src.planners.rift_planner.RIFTPlanner
+  _convert_: "all"
+
+  render: false
+  eval_dt: 0.1
+  eval_num_frames: 40
+  candidate_subsample_ratio: 1.0
+  candidate_min_num: 10
+  learning_based_score_weight: 0.3
+
+  planner:
+    _target_: src.models.pluto.pluto_model.PlanningModel
+    _convert_: "all"
+
+    dim: 128
+    state_channel: 6
+    polygon_channel: 6
+    history_channel: 9
+    history_steps: 21
+    future_steps: 80
+    encoder_depth: 4
+    decoder_depth: 4
+    drop_path: 0.2
+    dropout: 0.1
+    num_heads: 4
+    num_modes: 12
+    state_dropout: 0.75
+    use_ego_history: false
+    state_attn_encoder: true
+    use_hidden_proj: true
+    cat_x: true
+    ref_free_traj: true
+
+    feature_builder:
+      _target_: src.feature_builders.pluto_feature_builder.PlutoFeatureBuilder
+      _convert_: "all"
+      radius: 120
+      history_horizon: 2
+      future_horizon: 8
+      sample_interval: 0.1
+      max_agents: 48
+      build_reference_line: true
+
+
+  rl_config:
+    experiment_name: 'rlft0408'
+    update_interval: 10
+    mini_epochs: 1
+    clip_ratio: 0.2
+    lr: 5e-6
+    use_gpu: true
+    trainable_layers:
+      - "planning_decoder.pi_head"
+    save_dir: "rl_ckpt"
+    scenario_repeat: 2
+    train_batch_size: 32
+    val_batch_size: 64
+    shuffle: true
+    num_workers: 0
+    pin_memory: true
+    persistent_workers: true
+    train_ratio: 0.8
+    # 新增：磁盘缓存配置
+    enable_disk_cache: true       # 启用磁盘缓存
+    cache_dir: "rl_buffer_cache"  # 缓存目录
+#    vis_path: "rl_vis"
+    vis_path: null
+
+data_root: "/media/mj/EXTERNAL_USB/nuplan/dataset/nuplan-v1.1/splits/mini"
+map_root: "/media/mj/EXTERNAL_USB/nuplan/dataset/maps"
+sensor_root: "/media/mj/EXTERNAL_USB/nuplan/dataset/nuplan-v1.1/sensor_blobs"
+scenario_filter: rl_tiny_scenarios
+planner_ckpt: "/media/mj/EXTERNAL_USB/Pycharm-Projects/pluto/checkpoints/pluto_1M_aux_cil.ckpt"
+

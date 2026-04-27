@@ -1,11 +1,11 @@
 import fcntl
-import os, pickle, glob, h5py
+import os, pickle, h5py
 import numpy as np
 import torch
 
 from unitraj.datasets.base_dataset import BaseDataset
-from unitraj.datasets.VBDdata_utils import data_process_scenario
-from scenarionet.common_utils import read_scenario, read_dataset_summary
+from unitraj.datasets.VBD_dataset.VBDdata_utils import data_process_scenario
+from scenarionet.common_utils import read_scenario
 
 
 class VBDDataset(BaseDataset):

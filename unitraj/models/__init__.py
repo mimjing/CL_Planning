@@ -3,6 +3,7 @@ from unitraj.models.mtr.MTR import MotionTransformer
 from unitraj.models.vbd.model.vbd import VBD
 from unitraj.models.wayformer.wayformer import Wayformer
 from unitraj.models.smart.smart import SMART
+from unitraj.models.pluto.pluto_model import PlanningModel
 
 __all__ = {
     'autobot': AutoBotEgo,
@@ -10,6 +11,7 @@ __all__ = {
     'MTR': MotionTransformer,
     'SMART': SMART,
     'VBD': VBD,
+    'Pluto': PlanningModel,
 }
 
 

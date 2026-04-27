@@ -1,0 +1,6 @@
+source use_cuda118.sh
+
+pip install torch==2.0.1 torchvision==2.0.2 --index-url https://download.pytorch.org/whl/cu118
+
+
+python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA {torch.version.cuda}')"

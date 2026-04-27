@@ -111,6 +111,9 @@ class EvaluateMetrics:
                 if key == 'ttc':
                     updated_dict[key] = sum(value) / len(value) if value else 1.0
                     continue
+                if not value:
+                    updated_dict[key] = 0.0
+                    continue
                 # 检查列表中是否包含0，如果有就将该键值对的值设置为0
                 if any(score == 0 for score in value):
                     updated_dict[key] = 0
@@ -505,4 +508,3 @@ class EvaluateMetrics:
             file.write(table2)
 
         print(f"\nMetrics have been saved to {file_path}")
-

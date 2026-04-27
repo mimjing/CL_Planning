@@ -1,8 +1,7 @@
 import time
 import torch
-from omegaconf import DictConfig
 
-from unitraj.datasets.VBD_test_dataset import VBDTestDataset
+from unitraj.datasets.VBD_dataset.VBD_test_dataset import VBDTestDataset
 from unitraj.models.vbd.sim_agent.sim_actor import VBDTest
 
 ## Parameters

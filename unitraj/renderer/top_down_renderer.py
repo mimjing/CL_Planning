@@ -514,16 +514,25 @@ class TopDownRenderer:
             color = (200, 200, 200)  # fallback 浅灰
 
         # 2. 转成像素坐标
-        pix_points = [self._frame_canvas.pos2pix(x, y) for x, y in expert_traj[:,:2]]
+        pix_points = [self._frame_canvas.pos2pix(x, y) for x, y in expert_traj[::10,:2]]
 
-        # 3. 连续折线（比离散圆点更平滑）
-        pygame.draw.lines(
-            surface=self._frame_canvas,
-            color=color,
-            closed=False,
-            points=pix_points,
-            width=3  # 比规划轨迹圆点更粗
-        )
+        # # 3. 连续折线（比离散圆点更平滑）
+        # pygame.draw.lines(
+        #     surface=self._frame_canvas,
+        #     color=color,
+        #     closed=False,
+        #     points=pix_points,
+        #     width=3  # 比规划轨迹圆点更粗
+        # )
+        # 3. 绘制离散实心圆点
+        for pt in pix_points:
+            pygame.draw.circle(
+                surface=self._frame_canvas,
+                color=color,
+                center=pt,
+                radius=3,  # 圆点的半径大小（像素），可以根据显示效果适当放大或缩小
+                width=0  # width=0 表示填充实心圆
+            )
 
 
     def draw_pos_buffer(self, agent):
@@ -823,35 +832,6 @@ class TopDownRenderer:
         #
         v = self.engine.agents['default_agent']
 
-        if hasattr(v, 'ranked_indices_info'):
-            self.draw_srq_result(v.ranked_indices_info)
-
-        if self.show_plan_traj and hasattr(v, 'plan_traj'):
-            self.draw_plan_traj(v.plan_traj)
-
-        if self.show_plan_traj and hasattr(v, 'candidate_trajectories'):
-            for idx in range(v.candidate_trajectories.shape[0]):
-                self.draw_plan_traj(v.candidate_trajectories[idx], color_set=None, explicit_color=(150, 150, 150))
-            self.draw_plan_traj(v.plan_traj) # Redraw best on top
-
-        if self.show_plan_traj and hasattr(v, 'expert_traj'):
-            self.draw_expert_traj(v.expert_traj)
-
-        if self.show_plan_traj and hasattr(v, 'pre_plan_traj'):
-            self.draw_plan_traj(v.pre_plan_traj, 'blue')
-
-        if self.show_plan_traj and hasattr(v, 'safe_plan_traj'):
-            self.draw_plan_traj(v.safe_plan_traj)
-
-        if hasattr(v, 'pos_buffer') and v.pos_buffer is not None:
-            self.draw_pos_buffer(v)
-
-        if hasattr(v, 'key_points'):
-            self.draw_key_points(v)
-
-        if hasattr(v,'count'):
-            self.draw_time_info(v)
-
 
         for i, objects in enumerate(self.history_objects):
             if i == len(self.history_objects) - 1:
@@ -909,6 +889,15 @@ class TopDownRenderer:
                 object=v, surface=self._frame_canvas, heading=h, color=c, draw_contour=self.contour, contour_width=2
             )
 
+            # --- 修复：从 engine 中获取真正的物理对象来读取我们在 policy 中注入的轨迹属性 ---
+            real_obj = self.engine.get_objects().get(v.name)
+            if real_obj is not None and real_obj.name != self.engine.agents['default_agent'].name:
+                if self.show_plan_traj and hasattr(real_obj, 'plan_traj'):
+                    self.draw_plan_traj(real_obj.plan_traj, color_set=None, explicit_color=(128, 0, 128))
+
+                if self.show_plan_traj and hasattr(real_obj, 'expert_traj'):
+                    self.draw_expert_traj(real_obj.expert_traj)
+
         if not hasattr(self, "_deads"):
             self._deads = []
 
@@ -929,6 +918,38 @@ class TopDownRenderer:
                     radius=5
                 )
                 self._deads.append(v)
+
+        # ====== DRAW DEFAULT AGENT TRAJECTORIES ON TOP ======
+        v_default = self.engine.agents['default_agent']
+        if hasattr(v_default, 'ranked_indices_info'):
+            self.draw_srq_result(v_default.ranked_indices_info)
+
+        if self.show_plan_traj and hasattr(v_default, 'plan_traj'):
+            self.draw_plan_traj(v_default.plan_traj)
+
+        if self.show_plan_traj and hasattr(v_default, 'candidate_trajectories'):
+            for idx in range(v_default.candidate_trajectories.shape[0]):
+                self.draw_plan_traj(v_default.candidate_trajectories[idx, :40,:], color_set=None, explicit_color=(150, 150, 150))
+            self.draw_plan_traj(v_default.plan_traj) # Redraw best on top
+
+        if self.show_plan_traj and hasattr(v_default, 'expert_traj'):
+            self.draw_expert_traj(v_default.expert_traj)
+
+        if self.show_plan_traj and hasattr(v_default, 'pre_plan_traj'):
+            self.draw_plan_traj(v_default.pre_plan_traj, 'blue')
+
+        if self.show_plan_traj and hasattr(v_default, 'safe_plan_traj'):
+            self.draw_plan_traj(v_default.safe_plan_traj)
+
+        if hasattr(v_default, 'pos_buffer') and v_default.pos_buffer is not None:
+            self.draw_pos_buffer(v_default)
+
+        if hasattr(v_default, 'key_points'):
+            self.draw_key_points(v_default)
+
+        if hasattr(v_default,'count'):
+            self.draw_time_info(v_default)
+        # ====================================================
 
         v = self.current_track_agent
         canvas = self._frame_canvas

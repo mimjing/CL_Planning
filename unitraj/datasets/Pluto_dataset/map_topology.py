@@ -76,6 +76,9 @@ class LaneNode:
     polygon: Optional[np.ndarray]  # (M,2)
     entry: List[int]
     exit: List[int]
+    left_neighbors: List[int]
+    right_neighbors: List[int]
+    feature_type: str = ""
 
     @property
     def start(self) -> np.ndarray:
@@ -130,24 +133,45 @@ def build_lane_graph(
         if t and not any(h in t for h in LANE_TYPE_HINTS):
             continue
 
-        lane_id = _as_int_id(feat.get("id"))
+        # In our unified format, lane_id is the dict key (string form)
+        lane_id = _as_int_id(raw_id)
         if lane_id is None:
-            lane_id = _as_int_id(raw_id)
-        if lane_id is None:
-            # fall back to stable hash
+            # fall back to stable hash (still deterministic within run)
             lane_id = int(abs(hash(str(raw_id))) % (10**9))
 
-        centerline = _to_xy(
-            _get_first_present(feat, ["polyline", "centerline", "baseline_path", "line"])
-        )
+        # polyline points are (x, y, heading). We only keep (x, y) here.
+        centerline = _to_xy(_get_first_present(feat, ["polyline", "centerline", "baseline_path", "line"]))
         if centerline is None:
             # Some datasets encode lane centerline as polygon boundary; we can't use it reliably.
             continue
 
         polygon = _to_xy(_get_first_present(feat, ["polygon", "boundary", "poly"]))
 
-        entry = _get_first_present(feat, ["entry", "entries", "predecessors", "incoming", "in"])
-        exit_ = _get_first_present(feat, ["exit", "exits", "successors", "outgoing", "out"])
+        entry = _get_first_present(
+            feat,
+            [
+                "entry_lanes",
+                "entry",
+                "entries",
+                "predecessors",
+                "incoming",
+                "in",
+            ],
+        )
+        exit_ = _get_first_present(
+            feat,
+            [
+                "exit_lanes",
+                "exit",
+                "exits",
+                "successors",
+                "outgoing",
+                "out",
+            ],
+        )
+
+        left_n = _get_first_present(feat, ["left_neighbor", "left_neighbors", "left"])
+        right_n = _get_first_present(feat, ["right_neighbor", "right_neighbors", "right"])
 
         def _ids_list(v: Any) -> List[int]:
             if v is None:
@@ -167,6 +191,9 @@ def build_lane_graph(
             polygon=polygon,
             entry=_ids_list(entry),
             exit=_ids_list(exit_),
+            left_neighbors=_ids_list(left_n),
+            right_neighbors=_ids_list(right_n),
+            feature_type=t,
         )
 
     # 2) Build adjacency from explicit topology
@@ -216,6 +243,8 @@ def estimate_route_lane_ids(
     max_dist_m: float = 1.5,
     min_hold_frames: int = 3,
     no_backtrack: bool = True,
+    include_lateral_neighbors: bool = False,
+    lateral_hops: int = 1,
 ) -> List[int]:
     """Estimate ordered route lane ids by matching ego positions to nearest lane polygon/centerline.
 
@@ -309,5 +338,50 @@ def estimate_route_lane_ids(
         candidate = None
         candidate_count = 0
 
-    return route_seq
+    if not include_lateral_neighbors:
+        return route_seq
+
+    # Expand each committed lane with lateral neighbors *as provided by map_features*.
+    # We do NOT artificially choose “N lanes left/right”. Instead we include however many
+    # neighbor ids exist on each LaneNode.
+    #
+    # Note: if lateral_hops > 1, we only traverse to neighbor-of-neighbor relationships that
+    # are explicitly present in the provided neighbor lists (still fully data-driven).
+    hops = int(max(1, lateral_hops))
+
+    expanded: List[int] = []
+    expanded_set: Set[int] = set()
+
+    def _add(cid: int) -> None:
+        if cid in lane_graph.lanes and cid not in expanded_set:
+            expanded_set.add(cid)
+            expanded.append(cid)
+
+    def _ordered_lateral(nid: int) -> List[int]:
+        node = lane_graph.lanes.get(nid)
+        if node is None:
+            return []
+        # Preserve dataset-provided order: left neighbors first, then right neighbors.
+        out: List[int] = []
+        out.extend([x for x in (node.left_neighbors or [])])
+        out.extend([x for x in (node.right_neighbors or [])])
+        return out
+
+    for lid in route_seq:
+        _add(lid)
+
+        frontier = [lid]
+        for _ in range(hops):
+            nxt: List[int] = []
+            for cur in frontier:
+                for nb in _ordered_lateral(cur):
+                    if nb in lane_graph.lanes and nb not in expanded_set:
+                        nxt.append(nb)
+            for nb in nxt:
+                _add(nb)
+            frontier = nxt
+            if not frontier:
+                break
+
+    return expanded
 

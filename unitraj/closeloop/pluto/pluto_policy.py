@@ -6,5 +6,5 @@ class PlutoPolicy(InferencePolicy):
     """
     def __init__(self, obj, seed):
         super(PlutoPolicy, self).__init__(obj, seed)
-        self.Sim = PlutoInference(self.cfg)
+        self.Sim = PlutoInference(self.ego_cfg)
         self.Sim.initialize_model()

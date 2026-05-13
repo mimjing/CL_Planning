@@ -6,67 +6,6 @@ from torch.nn.utils.rnn import pad_sequence
 from unitraj.datasets.Pluto_dataset.utils import to_device, to_numpy, to_tensor
 import numpy as np
 
-def parse_tracks_to_states(tracks):
-    """
-    参数:
-        scenario (dict): 包含 'tracks' 键的字典，'tracks' 是一个字典，键为对象ID，值为包含 'state' 的字典。
-                         'state' 包含 'position', 'heading', 'velocity', 'valid', 'length', 'width', 'height' 等字段。
-                         每个字段都是形状为 (T, ...) 的数组，其中 T 是时间帧数。
-
-    返回:
-        ego_state_list (list): 自车状态列表，按帧排列，每个元素是该帧自车的状态字典。
-        tracked_objects_list (list): 周围车辆状态列表，按帧排列，每个元素是该帧所有周围车辆的状态字典列表。
-                                    结构: [ [frame_0_ego_state], [frame_1_ego_state], ... ]
-                                          和 [ [frame_0_obj1_state, frame_0_obj2_state, ...], [frame_1_obj1_state, frame_1_obj2_state, ...], ... ]
-    """
-    ego_state = tracks['ego']['state']
-    num_frames = len(ego_state['position'])
-
-    ego_state_list = []
-    # tracked_objects_list = []
-
-    # # 预加载所有非自车对象的ID和状态
-    # non_ego_objects = {}
-    # for obj_id, obj_data in tracks.items():
-    #     if obj_id != 'ego':
-    #         non_ego_objects[obj_id] = obj_data['state']
-
-    # 逐帧提取状态
-    for frame_idx in range(num_frames):
-        # 处理自车状态
-        ego_frame_state = {
-            'position': ego_state['position'][frame_idx].tolist(),
-            'heading': ego_state['heading'][frame_idx].item(),
-            'velocity': ego_state['velocity'][frame_idx].tolist(),
-            'valid': ego_state['valid'][frame_idx].item(),
-            'length': ego_state['length'][frame_idx].item(),
-            'width': ego_state['width'][frame_idx].item(),
-            'height': ego_state['height'][frame_idx].item()
-        }
-        ego_state_list.append(ego_frame_state)
-
-        # # 处理周围车辆状态
-        # frame_objects = []
-        # for obj_id, obj_state in non_ego_objects.items():
-        #     # 确保当前帧有效（通过valid数组判断）
-        #     if frame_idx >= len(obj_state['valid']) or not obj_state['valid'][frame_idx]:
-        #         continue  # 跳过无效帧
-        #
-        #     obj_frame_state = {
-        #         'position': obj_state['position'][frame_idx].tolist(),
-        #         'heading': obj_state['heading'][frame_idx].item(),
-        #         'velocity': obj_state['velocity'][frame_idx].tolist(),
-        #         'valid': obj_state['valid'][frame_idx].item(),
-        #         'length': obj_state['length'][frame_idx].item(),
-        #         'width': obj_state['width'][frame_idx].item(),
-        #         'height': obj_state['height'][frame_idx].item(),
-        #         'object_id': obj_id  # 可选：添加对象ID以便识别
-        #     }
-        #     frame_objects.append(obj_frame_state)
-        #
-        # tracked_objects_list.append(frame_objects)
-    return ego_state_list
-
 def calculate_additional_ego_states(current_state, prev_state, ego_params, dt=0.1):
     cur_velocity = current_state['velocity']
     angle_diff = current_state['heading'] - prev_state['heading']
@@ -94,22 +33,41 @@ def get_route_roadblock_ids(
 ):
     from shapely.geometry import Point, Polygon
 
-    route_roadblocks_ids = set()
     map_polygons = {}
+    left_neighbors = {}
+    right_neighbors = {}
     for map_id, feature in (map_feature_list or {}).items():
-        # if not isinstance(feature, dict):
-        #     continue
         if not _is_lane_like(str(feature.get("type", ""))):
             continue
         poly_points = feature.get("polygon", None)
-        # if poly_points is None:
-        #     continue
         if poly_points is None or len(poly_points) < 3:
             continue
-        try:
-            map_polygons[map_id] = Polygon(poly_points)
-        except Exception:
-            continue
+
+        map_polygons[map_id] = Polygon(poly_points)
+
+        def _parse_neighbor_ids(v):
+            if v is None:
+                return []
+            if isinstance(v, dict):
+                v = [v]
+            if isinstance(v, (str, int, np.integer)):
+                v = [v]
+            out = []
+            for item in list(v):
+                if isinstance(item, dict):
+                    # common keys in unified format
+                    item = item.get('feature_id', item.get('id', item.get('lane_id', None)))
+                if item is None:
+                    continue
+                out.append(str(item))
+            return out
+
+        left_neighbors[str(map_id)] = _parse_neighbor_ids(
+            feature.get('left_neighbor', feature.get('left_neighbors', feature.get('left', None)))
+        )
+        right_neighbors[str(map_id)] = _parse_neighbor_ids(
+            feature.get('right_neighbor', feature.get('right_neighbors', feature.get('right', None)))
+        )
 
     if not map_polygons:
         return []
@@ -169,29 +127,31 @@ def get_route_roadblock_ids(
             candidate_count += 1
 
         if candidate_count >= max(1, min_hold_frames):
-            # commit switch
             route_seq.append(candidate)
             committed_set.add(candidate)
             last_committed = candidate
             candidate = None
             candidate_count = 0
-    return route_seq
+    # 4) Expand each committed lane id with its left/right neighbors.
+    expanded = []
+    expanded_set = set()
 
-    # for state in ego_state_list:
-    #     pos = state['position']
-    #     if isinstance(pos, np.ndarray) or isinstance(pos, list):
-    #         x, y = pos[0], pos[1]
-    #     else:
-    #         x, y = pos.x, pos.y
-    #
-    #     point = Point(x, y)
-    #     for map_id, polygon in map_polygons.items():
-    #         if polygon.contains(point) or polygon.distance(point) < 0.1:
-    #             try:
-    #                 route_roadblocks_ids.add(int(map_id))
-    #             except Exception:
-    #                 route_roadblocks_ids.add(hash(str(map_id)) % (10**8))
-    # return list(route_roadblocks_ids)
+    for rid in route_seq:
+        rid_s = str(rid)
+        candidates = [rid_s]
+        candidates += left_neighbors.get(rid_s, [])
+        candidates += right_neighbors.get(rid_s, [])
+
+        for cid in candidates:
+            if cid is None:
+                continue
+            if cid in expanded_set:
+                continue
+            expanded_set.add(cid)
+            expanded.append(cid)
+
+    return expanded
+
 
 def interpolate_polyline(polyline: np.ndarray, num_points: int) -> np.ndarray:
     """

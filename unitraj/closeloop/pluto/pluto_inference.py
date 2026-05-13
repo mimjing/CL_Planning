@@ -10,7 +10,7 @@ class PlutoInference:
     def __init__(self, cfg):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.cfg = cfg
-        self.dataset = PlutoTestDataset(cfg)
+        self.dataset = PlutoTestDataset(cfg, is_validation=True)
 
     def initialize_model(self):
         """Initialize the model for Pluto."""
@@ -36,13 +36,14 @@ class PlutoInference:
     def run_inference(self, current_state, timestep):
         t1 = time.time()
         with torch.no_grad():
-            [pluto_feature] = self.dataset.process_scenario(current_state, timestep - 1)
+            [pluto_feature] = self.dataset.process_scenario(current_state, timestep-1)
             t2 = time.time()
             ref_lines = pluto_feature['reference_line']
 
             # batch is the standard UniTraj batch_dict: {'batch_size', 'input_dict', ...}
             from unitraj.datasets.Pluto_dataset.pluto_utils import collate_pluto_dicts, to_feature_tensor_dict
             input_dict = collate_pluto_dicts([to_feature_tensor_dict(pluto_feature)])
+            t3 = time.time()
 
             def to_device(data, device):
                 if isinstance(data, torch.Tensor):
@@ -54,10 +55,13 @@ class PlutoInference:
                 return data
 
             input_dict = to_device(input_dict, self.device)
+            t4 = time.time()
 
             out = self.model.forward(input_dict)
+            t5 = time.time()
 
-            candidate_trajectories = out["candidate_trajectories"][0].cpu().numpy()
+            # candidate_trajectories = out["candidate_trajectories"][0].cpu().numpy()
+            candidate_trajectories = out["trajectory"][0].cpu().numpy()
             probability = out["probability"][0].cpu().numpy()
 
             if len(candidate_trajectories.shape) == 4:
@@ -74,11 +78,24 @@ class PlutoInference:
             # Start rule-based evaluation avoiding NuPlan dependencies
             from unitraj.closeloop.pluto.trajectory_evaluator import TrajectoryEvaluator
             evaluator = TrajectoryEvaluator(self.cfg)
-            rule_based_scores = evaluator.evaluate(sorted_candidate_trajectories, input_data)
-            
+            rule_based_scores = evaluator.evaluate(sorted_candidate_trajectories, input_data, out.get("output_prediction"))
+
             # Combine rule-based and learning-based scores
-            learning_weight = self.cfg.get('learning_based_score_weight', 0.25)
-            final_scores = rule_based_scores + learning_weight * sorted_probability
+            # NOTE: rule_based_scores can be large negative penalties (e.g., -100/-200),
+            # while probabilities are in [0, 1]. Combine on comparable scales.
+            # Default: use log-probability and a soft feasibility transform for rule-based.
+            eps = 1e-12
+            learning_weight = float(self.cfg.get('learning_based_score_weight', 0.75))
+            rule_weight = float(self.cfg.get('rule_based_score_weight', 0.25))
+            penalty_scale = float(self.cfg.get('rule_based_penalty_scale', 50.0))
+
+            # Convert negative-penalty score into (0, 1] feasibility.
+            # score==0 -> 1.0, score==-100 -> exp(-2) ~ 0.135 when scale=50
+            rule_feas = np.exp(np.clip(rule_based_scores, -1e6, 0.0) / max(penalty_scale, 1e-6))
+
+            # Use log-prob to avoid tiny linear contributions.
+            logp = np.log(sorted_probability + eps)
+            final_scores = rule_weight * np.log(rule_feas + eps) + learning_weight * logp
             best_idx = int(np.argmax(final_scores))
 
             # Predictions are in the ego-centric coordinate system (centered at ego agent's position and heading),
@@ -92,8 +109,12 @@ class PlutoInference:
             if origin is not None and angle is not None:
                 rot_mat = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
                 sorted_candidate_trajectories[..., :2] = np.matmul(sorted_candidate_trajectories[..., :2], rot_mat.T) + origin
-                if sorted_candidate_trajectories.shape[-1] > 2:
-                    sorted_candidate_trajectories[..., 2] += angle
+                if sorted_candidate_trajectories.shape[-1] >= 4:
+                    # 2, 3 对应 cos_yaw, sin_yaw，可以直接用旋转矩阵变换
+                    sorted_candidate_trajectories[..., 2:4] = np.matmul(sorted_candidate_trajectories[..., 2:4], rot_mat.T)
+                if sorted_candidate_trajectories.shape[-1] >= 6:
+                    # 4, 5 对应 vx, vy，同样接受旋转矩阵变换
+                    sorted_candidate_trajectories[..., 4:6] = np.matmul(sorted_candidate_trajectories[..., 4:6], rot_mat.T)
 
                 if ref_lines is not None:
                     import copy
@@ -102,7 +123,8 @@ class PlutoInference:
                     if 'orientation' in ref_lines:
                         ref_lines['orientation'] += angle
 
-            if timestep % 4==0:
+            if timestep == 0:  # Visualize at the first prediction step (T=0)
+            # if timestep :
                 import matplotlib.pyplot as plt
                 # 1. 绘制道路参考线
                 for i in range(ref_lines['position'].shape[0]):
@@ -147,14 +169,28 @@ class PlutoInference:
                 plt.legend()
                 plt.show()
 
-
             # Format output sequence to [num_agents, future_len, 5]
             T_out = sorted_candidate_trajectories.shape[1]
             C_out = sorted_candidate_trajectories.shape[-1]
-            pred_traj = np.zeros((16, min(T_out, 80), 5), dtype=np.float32)
-            traj_len = min(T_out, 80)
+            pred_traj = np.zeros((16, min(T_out, 80), 6), dtype=np.float32)
             # Use candidate excluding the history prepended '0' frame logic, just taking the 80 steps
             offset = 1 if T_out == 81 else 0
             pred_traj[0, :80, :C_out] = sorted_candidate_trajectories[best_idx, offset:offset+80]
-            t3 = time.time()
-        return pred_traj, ref_lines, sorted_candidate_trajectories[:, offset:offset+80]
+
+            info = {}
+            if 'agent_tokens' in pluto_feature:
+                info['agent_tokens'] = pluto_feature['agent_tokens']
+            if 'output_prediction' in out:
+                pred = out['output_prediction'][0].detach().cpu().numpy()
+                if origin is not None and angle is not None:
+                    rot_mat = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+                    pred[..., :2] = np.matmul(pred[..., :2], rot_mat.T) + origin
+                    if pred.shape[-1] >= 3:
+                        pred[..., 2] += angle
+                    if pred.shape[-1] >= 5:
+                        pred[..., 3:5] = np.matmul(pred[..., 3:5], rot_mat.T)
+                info['prediction'] = pred
+
+            t6 = time.time()
+            # print(f"[Pluto Profiling] step: {timestep}, process_scenario: {t2-t1:.3f}s, collate&to_tensor: {t3-t2:.3f}s, to_device: {t4-t3:.3f}s, model_forward: {t5-t4:.3f}s, postprocess: {t6-t5:.3f}s")
+        return pred_traj, ref_lines, sorted_candidate_trajectories[:, offset:offset+80], info

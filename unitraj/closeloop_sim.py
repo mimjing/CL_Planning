@@ -25,8 +25,8 @@ desc = "Load a database to simulator and replay scenarios"
 parser = argparse.ArgumentParser(description=desc)
 parser.add_argument("--file_path", default=os.path.join(os.path.dirname(__file__), "configs", "config.yaml"), help="The class of the model")
 parser.add_argument("--render", default="2D", choices=["none", "2D", "3D", "advanced", "semantic"])
-parser.add_argument("--max_step", default=80, type=int)
-parser.add_argument("--eval_eps", default=100, type=int)
+parser.add_argument("--max_step", default=100, type=int)
+parser.add_argument("--eval_eps", default=40, type=int)
 args = parser.parse_args()
 
 with open(args.file_path, "r") as file:
@@ -51,7 +51,7 @@ def create_env():
             "num_scenarios": 6,
             "sequential_seed": False,
             "start_scenario_index": 0,
-            "horizon": 80,
+            "horizon": 100,
             "vehicle_config": dict(
                 show_navi_mark=True,
                 show_line_to_dest=True,
@@ -92,7 +92,8 @@ if __name__ == '__main__':
             #     continue
 
             # used_ids.add(scenario['id'])
-
+            # if scenario['id'] not in ['d813159f7ed25ee7']:
+            #     continue
             eval_env.head_renderer = HeadTopDownRenderer(eval_env)
             eval_env.engine.head_renderer = eval_env.head_renderer
             i_step = 0

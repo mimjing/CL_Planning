@@ -8,57 +8,45 @@ import numpy as np
 import h5py
 
 from unitraj.datasets.Pluto_dataset.cost_map_manager import CostMapManager
-from unitraj.datasets.Pluto_dataset.pluto_utils import _is_lane_like
 from unitraj.datasets.Pluto_dataset.utils import save_dict_to_hdf5
 from unitraj.datasets.base_dataset import BaseDataset
 from scenarionet.common_utils import read_scenario
 
 from shapely.geometry import Polygon
 from shapely.geometry import Point, LineString
-from typing import Optional, List, Tuple
-from unitraj.datasets.Pluto_dataset.pluto_utils import parse_tracks_to_states, get_route_roadblock_ids, \
-    calculate_additional_ego_states, PlutoFeature, interpolate_polyline
+from typing import List, Tuple
+from unitraj.datasets.Pluto_dataset.pluto_utils import  calculate_additional_ego_states,\
+    PlutoFeature, interpolate_polyline, _is_lane_like
+
+from unitraj.datasets.Pluto_dataset.map_topology import build_lane_graph, estimate_route_lane_ids
 
 
 
 
-def _get_ego_features(state, ego_category_idx: int = 0, present_idx: int = 20, history_samples: int = 20, future_samples: int = 79):
+def _get_ego_features(state, ego_category_idx: int = 0, present_idx: int = 20, history_samples: int = 20):
     pos = state['position']
-    
-    # Calculate the valid slicing indices based on present_idx
     history_start = max(0, present_idx - history_samples)
-    pad_front = max(0, history_samples - present_idx)
-    future_end = present_idx + 1 + future_samples
+    end = present_idx + 1
     
-    pos = pos[history_start:future_end]
-    
+    pos = pos[history_start:end]
     T = len(pos)
     position = pos[..., :2] if pos.shape[-1] >= 2 else pos
-    heading = state['heading'][history_start:future_end]
-    vel = state['velocity'][history_start:future_end]
+    heading = state['heading'][history_start:end]
+    vel = state['velocity'][history_start:end]
     velocity = vel[..., :2] if vel.shape[-1] >= 2 else vel
 
     if 'acceleration' in state:
-        accel = state['acceleration'][history_start:future_end]
+        accel = state['acceleration'][history_start:end]
         acceleration = accel[..., :2] if accel.shape[-1] >= 2 else accel
     else:
         acceleration = np.zeros((T, 2), dtype=np.float64)
 
-    width = np.array(state['width'][history_start:future_end]).reshape(-1, 1)
-    length = np.array(state['length'][history_start:future_end]).reshape(-1, 1)
+    width = np.array(state['width'][history_start:end]).reshape(-1, 1)
+    length = np.array(state['length'][history_start:end]).reshape(-1, 1)
     shape = np.concatenate([width, length], axis=-1)
 
-    valid_mask = state['valid'][history_start:future_end]
+    valid_mask = state['valid'][history_start:end]
     category = np.array(ego_category_idx, dtype=np.int8)
-
-    # Pad the front if history_start was constrained by 0 (i.e. at the beginning of the scenario)
-    if pad_front > 0:
-        position = np.pad(position, ((pad_front, 0), (0, 0)), mode='edge')
-        heading = np.pad(heading, (pad_front, 0), mode='edge')
-        velocity = np.pad(velocity, ((pad_front, 0), (0, 0)), mode='constant')
-        acceleration = np.pad(acceleration, ((pad_front, 0), (0, 0)), mode='constant')
-        shape = np.pad(shape, ((pad_front, 0), (0, 0)), mode='edge')
-        valid_mask = np.pad(valid_mask, (pad_front, 0), mode='constant', constant_values=False)
 
     return {
         "position": position.astype(np.float64),
@@ -67,7 +55,7 @@ def _get_ego_features(state, ego_category_idx: int = 0, present_idx: int = 20, h
         "acceleration": acceleration.astype(np.float64),
         "shape": shape.astype(np.float64),
         "category": category,
-        "valid_mask": valid_mask,
+        "valid_mask": valid_mask.astype(np.bool_),
     }
 
 
@@ -111,12 +99,8 @@ class PlutoDataset(BaseDataset):
         # map polygon categories (nuplan: [LANE, LANE_CONNECTOR, CROSSWALK])
         self.polygon_types = ["LANE", "LANE_CONNECTOR", "CROSSWALK"]
 
-        self.max_agents = 64
+        self.max_agents = 48
         self.max_static_obstacles = 10
-        self.max_map_points = 3000
-        self.max_polylines = 256
-        self.history_length = 11  # Assuming standard
-        self.num_points_polyline = 30
         self.__collate_fn__ = PlutoFeature.collate
 
         self.radius = config.get('radius', 100)
@@ -167,7 +151,7 @@ class PlutoDataset(BaseDataset):
 
         return file_list
 
-    def preprocess(self, scenario):
+    def preprocess(self, scenario, current_step=20):
         """
         In UniTraj, preprocess often generates intermediate dict. 
         Here we skip intermediate formatting and construct pluto feature dict explicitly.
@@ -178,7 +162,7 @@ class PlutoDataset(BaseDataset):
         self.ego_params = scenario['metadata']['ego_vehicle_parameters']
         all_tracks = scenario['tracks']
 
-        ego_state_list = parse_tracks_to_states(all_tracks)
+        ego_state_list = self.parse_tracks_to_states(all_tracks)
         map_features_list = scenario['map_features']
         traffic_light_status = scenario['dynamic_map_states']
         return [ego_state_list, map_features_list, traffic_light_status, all_tracks]
@@ -186,15 +170,35 @@ class PlutoDataset(BaseDataset):
     def process(self, data, current_step=20):
         [ego_state_list, map_features_list, traffic_light_status, all_tracks] = data
         
+        # Start map tracking
+        if not hasattr(self, '_lane_graph_cache'):
+            self._lane_graph_cache = {}
+        
         # Use current_step as the present index instead of hardcoded self.history_samples
         present_idx = current_step
-        total_steps = self.history_samples + 1 + self.future_samples
         present_idx = min(present_idx, len(ego_state_list) - 1)
         
         present_ego_state = ego_state_list[present_idx]
         query_xy = present_ego_state['position'][:2]
+        # print('query_xy', query_xy)
 
-        route_roadblocks_ids = get_route_roadblock_ids(ego_state_list, map_features_list)
+        # Build lane topology once and reuse in downstream feature extraction.
+        # Speed optimization: cache it for the same map instance (object id)
+        map_id = id(map_features_list)
+        if map_id not in self._lane_graph_cache:
+            lane_graph = build_lane_graph(map_features_list, infer_from_geometry=True, geom_link_dist_m=2.0)
+            ego_xy = np.asarray([s['position'][:2] for s in ego_state_list], dtype=np.float64)
+            route_lane_seq = estimate_route_lane_ids(
+                ego_xy,
+                lane_graph,
+                max_dist_m=1.5,
+                min_hold_frames=3,
+                no_backtrack=True,
+                include_lateral_neighbors=True,
+            )
+            self._lane_graph_cache[map_id] = (lane_graph, route_lane_seq)
+        else:
+            lane_graph, route_lane_seq = self._lane_graph_cache[map_id]
 
         data = {}
         prev_idx = max(0, present_idx - 1)
@@ -207,12 +211,8 @@ class PlutoDataset(BaseDataset):
             ego_category_idx=self.interested_objects_types.index("EGO"),
             present_idx=present_idx,
             history_samples=self.history_samples,
-            future_samples=self.future_samples
         )
-        # Align ego features to expected horizon length.
-        for k in ["position", "heading", "velocity", "acceleration", "shape", "valid_mask"]:
-            if k in ego_features:
-                ego_features[k] = _pad_or_truncate(ego_features[k], total_steps, axis=0, pad_value=0.0)
+        # print('ego features', ego_features['position'])
         agent_features, agent_tokens, agents_polygon = self._get_agent_features(
             query_xy=query_xy,
             present_idx=present_idx,
@@ -240,10 +240,11 @@ class PlutoDataset(BaseDataset):
         data["map"], map_polygon_tokens = self._get_map_features(
             map_features_list=map_features_list,
             query_xy=query_xy,
-            route_roadblock_ids=route_roadblocks_ids,
+            route_roadblock_ids=route_lane_seq,
             traffic_light_status=traffic_light_status,
             radius=self.radius,
             present_idx=present_idx,
+            lane_graph=lane_graph,
         )
 
         if not is_validation:
@@ -291,7 +292,9 @@ class PlutoDataset(BaseDataset):
         data["reference_line"] = self._get_reference_line_feature(
             ego_features=ego_features,
             map_features_list=map_features_list,
-            route_roadblock_ids=route_roadblocks_ids,
+            route_roadblock_ids=route_lane_seq,
+            lane_graph=lane_graph,
+            training=bool(not self.is_validation)
         )
 
         return PlutoFeature.normalize(data, first_time=True, radius=self.radius)
@@ -326,6 +329,38 @@ class PlutoDataset(BaseDataset):
     #     }
     #     return PlutoFeature(data=data)
 
+    def parse_tracks_to_states(self, tracks):
+        """
+        参数:
+            scenario (dict): 包含 'tracks' 键的字典，'tracks' 是一个字典，键为对象ID，值为包含 'state' 的字典。
+                             'state' 包含 'position', 'heading', 'velocity', 'valid', 'length', 'width', 'height' 等字段。
+                             每个字段都是形状为 (T, ...) 的数组，其中 T 是时间帧数。
+
+        返回:
+            ego_state_list (list): 自车状态列表，按帧排列，每个元素是该帧自车的状态字典。
+            tracked_objects_list (list): 周围车辆状态列表，按帧排列，每个元素是该帧所有周围车辆的状态字典列表。
+                                        结构: [ [frame_0_ego_state], [frame_1_ego_state], ... ]
+                                              和 [ [frame_0_obj1_state, frame_0_obj2_state, ...], [frame_1_obj1_state, frame_1_obj2_state, ...], ... ]
+        """
+        ego_state = tracks['ego']['state']
+        T = len(ego_state['position'])
+        ego_state_list = []
+
+        # 逐帧提取状态
+        for frame_idx in range(T):
+            # 处理自车状态
+            ego_frame_state = {
+                'position': ego_state['position'][frame_idx].tolist(),
+                'heading': ego_state['heading'][frame_idx].item(),
+                'velocity': ego_state['velocity'][frame_idx].tolist(),
+                'valid': ego_state['valid'][frame_idx].item(),
+                'length': ego_state['length'][frame_idx].item(),
+                'width': ego_state['width'][frame_idx].item(),
+                'height': ego_state['height'][frame_idx].item()
+            }
+            ego_state_list.append(ego_frame_state)
+        return ego_state_list
+
     def _get_ego_current_state(self, ego_state, prev_state):
         state = np.zeros(7, dtype=np.float64)
         state[0:2] = ego_state['position'][:2]
@@ -347,12 +382,10 @@ class PlutoDataset(BaseDataset):
         present_idx: int,
         all_tracks,
     ):
-        total_steps = self.history_samples + 1 + self.future_samples
-
         # Find valid non-ego agents at present_idx
         present_agents = []
         for obj_id, track in all_tracks.items():
-            if str(obj_id) == 'ego' or str(obj_id) == self.ego_params:  # rough check for ego
+            if str(obj_id) == 'ego' or str(track.get("type", "")).upper() not in self.interested_objects_types: # rough check for ego
                 continue
             state = track['state']
             if state['valid'][present_idx]:
@@ -363,14 +396,14 @@ class PlutoDataset(BaseDataset):
         present_agents.sort(key=lambda x: x[0])
         present_agents = present_agents[:self.max_agents]
         
-        N = len(present_agents)
+        N, T = min(len(present_agents), self.max_agents), self.history_samples + 1
         
-        position = np.zeros((N, total_steps, 2), dtype=np.float64)
-        heading = np.zeros((N, total_steps), dtype=np.float64)
-        velocity = np.zeros((N, total_steps, 2), dtype=np.float64)
-        shape = np.zeros((N, total_steps, 2), dtype=np.float64)
+        position = np.zeros((N, T, 2), dtype=np.float64)
+        heading = np.zeros((N, T), dtype=np.float64)
+        velocity = np.zeros((N, T, 2), dtype=np.float64)
+        shape = np.zeros((N, T, 2), dtype=np.float64)
         category = np.zeros((N,), dtype=np.int8)
-        valid_mask = np.zeros((N, total_steps), dtype=np.bool_)
+        valid_mask = np.zeros((N, T), dtype=np.bool_)
         polygon = [None] * N
         
         agent_tokens = []
@@ -395,31 +428,12 @@ class PlutoDataset(BaseDataset):
 
             # Minimal, fast path: slice/pad to fixed horizon.
             history_start = max(0, present_idx - self.history_samples)
-            pad_front = max(0, self.history_samples - present_idx)
-            future_end = present_idx + 1 + self.future_samples
+            end = present_idx + 1
 
-            pos_seq = np.asarray(track_state['position'], dtype=np.float64)[history_start:future_end, :2]
-            vel_seq = np.asarray(track_state['velocity'], dtype=np.float64)[history_start:future_end, :2]
-            hdg_seq = np.asarray(track_state['heading'], dtype=np.float64)[history_start:future_end]
-            vld_seq = np.asarray(track_state['valid'], dtype=bool)[history_start:future_end]
-
-            if pad_front > 0:
-                pos_seq = np.pad(pos_seq, ((pad_front, 0), (0, 0)), mode='edge')
-                vel_seq = np.pad(vel_seq, ((pad_front, 0), (0, 0)), mode='constant')
-                hdg_seq = np.pad(hdg_seq, (pad_front, 0), mode='edge')
-                vld_seq = np.pad(vld_seq, (pad_front, 0), mode='constant', constant_values=False)
-
-            if len(pos_seq) > total_steps:
-                pos_seq = pos_seq[:total_steps]
-                vel_seq = vel_seq[:total_steps]
-                hdg_seq = hdg_seq[:total_steps]
-                vld_seq = vld_seq[:total_steps]
-            elif len(pos_seq) < total_steps:
-                pad_back = total_steps - len(pos_seq)
-                pos_seq = np.pad(pos_seq, ((0, pad_back), (0, 0)), mode='edge')
-                vel_seq = np.pad(vel_seq, ((0, pad_back), (0, 0)), mode='constant')
-                hdg_seq = np.pad(hdg_seq, (0, pad_back), mode='edge')
-                vld_seq = np.pad(vld_seq, (0, pad_back), mode='constant', constant_values=False)
+            pos_seq = np.asarray(track_state['position'], dtype=np.float64)[history_start:end, :2]
+            vel_seq = np.asarray(track_state['velocity'], dtype=np.float64)[history_start:end, :2]
+            hdg_seq = np.asarray(track_state['heading'], dtype=np.float64)[history_start:end]
+            vld_seq = np.asarray(track_state['valid'], dtype=bool)[history_start:end]
 
             position[idx] = pos_seq
             velocity[idx] = vel_seq
@@ -445,17 +459,10 @@ class PlutoDataset(BaseDataset):
             category[idx] = cat
 
             # Build present-time polygon for this agent (used by cost map parked-agent logic).
-            try:
-                # the present_idx in the sliced array is always self.history_samples
-                if bool(vld_seq[self.history_samples]):
-                    center_now = pos_seq[self.history_samples]
-                    heading_now = float(hdg_seq[self.history_samples])
-                    poly_xy = _box_corners_xy(center_now, heading_now, float(w0), float(l0))
-                    polygon[idx] = Polygon(poly_xy)
-                else:
-                    polygon[idx] = None
-            except Exception:
-                polygon[idx] = None
+            center_now = pos_seq[self.history_samples]
+            heading_now = float(hdg_seq[self.history_samples])
+            poly_xy = _box_corners_xy(center_now, heading_now, float(w0), float(l0))
+            polygon[idx] = Polygon(poly_xy)
             
         agent_features = {
             "position": position,
@@ -475,12 +482,11 @@ class PlutoDataset(BaseDataset):
         all_tracks,
     ):
         static_objects = []
-        dynamic_types = {'VEHICLE', 'PEDESTRIAN', 'BICYCLE'}
+        # dynamic_types = {'VEHICLE', 'PEDESTRIAN', 'BICYCLE'}
 
         for obj_id, track in all_tracks.items():
-            track_type_raw = track.get('type', '')
-            track_type = str(track_type_raw).upper()
-            if track_type in dynamic_types or track_type == 'EGO':
+            track_type = str(track.get('type', '')).upper()
+            if track_type in self.interested_objects_types:
                 continue
 
             state = track['state']
@@ -488,8 +494,7 @@ class PlutoDataset(BaseDataset):
                 continue
 
             pos = state['position'][present_idx][:2]
-            dist = np.linalg.norm(np.array(pos) - np.array(query_xy))
-            if dist > self.radius:
+            if np.linalg.norm(np.array(pos) - np.array(query_xy)) > self.radius:
                 continue
 
             heading = state['heading'][present_idx]
@@ -499,7 +504,7 @@ class PlutoDataset(BaseDataset):
                 'width']
 
             # Map static obstacle type to pluto_feature_builder indices
-            if "TRAFFIC_BARRIER" in track_type:
+            if "BARRIER" in track_type:
                 cat = self.static_objects_types.index("TRAFFIC_BARRIER")
             elif "CONE" in track_type or "TRAFFIC_CONE" in track_type:
                 cat = self.static_objects_types.index("TRAFFIC_CONE")
@@ -533,60 +538,36 @@ class PlutoDataset(BaseDataset):
         radius: float,
         sample_points: int = 20,
         present_idx: int = None,
+        lane_graph=None,
     ):
         present_idx_use = present_idx if present_idx is not None else self.history_samples
         route_ids = set(str(route_id) for route_id in route_roadblock_ids)
 
         # traffic_light_status (SD) is typically a dict keyed by lane_connector_id/lane_id.
         # We convert it to lane_id -> numeric status at present_idx.
-        # Encoding (align with other UniTraj datasets):
-        #   0: UNKNOWN, 1: GREEN, 2: YELLOW, 3: RED
+        # IMPORTANT: Align with NuPlan TrafficLightStatusType used by Pluto pretrained weights:
+        #   GREEN=0, YELLOW=1, RED=2, UNKNOWN=3
         state_mapping = {
-            "TRAFFIC_LIGHT_UNKNOWN": 0,
-            "UNKNOWN": 0,
-            "0": 0,
-            "TRAFFIC_LIGHT_GREEN": 1,
-            "GREEN": 1,
-            "1": 1,
-            "TRAFFIC_LIGHT_YELLOW": 2,
-            "YELLOW": 2,
-            "2": 2,
-            "TRAFFIC_LIGHT_RED": 3,
-            "RED": 3,
-            "3": 3,
+            "TRAFFIC_LIGHT_GREEN": 0,
+            "TRAFFIC_LIGHT_YELLOW": 1,
+            "TRAFFIC_LIGHT_RED": 2,
+            "TRAFFIC_LIGHT_UNKNOWN": 3,
         }
 
         def _tl_to_int(x) -> int:
             if x is None:
                 return 0
-            if isinstance(x, dict):
-                # sometimes {'status': 'TRAFFIC_LIGHT_RED'}
-                x = x.get('status', x.get('state', x))
-            if isinstance(x, (np.integer, int)):
-                # If another exporter already uses ints, clamp to [0..3]
-                v = int(x)
-                return v if 0 <= v <= 3 else 0
             s = str(x).upper()
-            return int(state_mapping.get(s, 0))
+            return int(state_mapping.get(s, 3))
 
         tls = {}
         for lane_id, tl_info in (traffic_light_status or {}).items():
-            if not isinstance(tl_info, dict):
-                tls[str(lane_id)] = _tl_to_int(tl_info)
-                continue
             state = tl_info.get('state', {}) if isinstance(tl_info.get('state', None), dict) else {}
             obj_state = state.get('object_state', None)
-            if obj_state is None:
-                obj_state = tl_info.get('object_state', None)
-
-            if isinstance(obj_state, (list, tuple, np.ndarray)) and len(obj_state) > present_idx_use:
-                tls[str(lane_id)] = _tl_to_int(obj_state[present_idx_use])
-            else:
-                tls[str(lane_id)] = _tl_to_int(obj_state)
+            tls[str(lane_id)] = _tl_to_int(obj_state[present_idx_use])
 
         lane_objects = []
         crosswalk_objects = []
-
         query_pos = query_xy
 
         for map_id, map_feat in map_features_list.items():
@@ -605,10 +586,8 @@ class PlutoDataset(BaseDataset):
             obj_type = str(map_feat.get('type', '')).upper()
             if 'CROSSWALK' in obj_type:
                 crosswalk_objects.append((map_id, map_feat))
-            else:
+            elif _is_lane_like(obj_type) :
                 lane_objects.append((map_id, map_feat))
-
-        object_ids = [map_id for map_id, _ in lane_objects + crosswalk_objects]
 
         # Build per-polygon records first to avoid shape/broadcast issues when
         # some polygons are invalid and must be skipped.
@@ -636,9 +615,59 @@ class PlutoDataset(BaseDataset):
                 
             # Sample discrete path from polyline
             centerline = interpolate_polyline(polyline[:, :2], sample_points + 1)
-            # Since we lack explicit left/right boundaries, we just duplicate centerline for now
-            left_bound = centerline.copy()
-            right_bound = centerline.copy()
+
+            # Approximate lane boundaries.
+            # 1) Prefer neighbor lane centerlines (left/right) if available; this matches your unified schema
+            #    where left/right neighbors are lane IDs.
+            # 2) Else, try to estimate a lateral offset from polygon (lane boundary) if provided.
+            # 3) Fallback: duplicate centerline.
+            left_bound = None
+            right_bound = None
+
+            try:
+                lid = int(map_id) if str(map_id).isdigit() else None
+            except Exception:
+                lid = None
+
+            if lid is not None and lid in lane_graph.lanes:
+                node = lane_graph.lanes[lid]
+                if node.left_neighbors:
+                    nb = node.left_neighbors[0]
+                    if nb in lane_graph.lanes:
+                        left_bound = interpolate_polyline(lane_graph.lanes[nb].centerline, sample_points + 1)
+                if node.right_neighbors:
+                    nb = node.right_neighbors[0]
+                    if nb in lane_graph.lanes:
+                        right_bound = interpolate_polyline(lane_graph.lanes[nb].centerline, sample_points + 1)
+
+            if left_bound is None or right_bound is None:
+                polygon = lane.get('polygon', None)
+                poly_xy = None
+                if polygon is not None:
+                    try:
+                        poly_xy = np.asarray(polygon, dtype=np.float64)
+                        if poly_xy.ndim == 2 and poly_xy.shape[0] >= 3:
+                            poly_xy = poly_xy[:, :2]
+                        else:
+                            poly_xy = None
+                    except Exception:
+                        poly_xy = None
+
+                if poly_xy is not None:
+                    # Estimate lane half-width as median distance from centerline samples to polygon vertices.
+                    # This is a rough proxy but better than duplicating the centerline.
+                    d = np.min(np.linalg.norm(poly_xy[None, :, :] - centerline[:, None, :], axis=-1), axis=1)
+                    half_w = float(np.clip(np.median(d), 0.5, 6.0))
+                    # Build left/right offset using local tangent normals.
+                    tang = np.diff(centerline, axis=0, prepend=centerline[0:1])
+                    nrm = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+                    nrm_norm = np.linalg.norm(nrm, axis=1, keepdims=True)
+                    nrm = nrm / np.clip(nrm_norm, 1e-6, None)
+                    if left_bound is None:
+                        left_bound = centerline + half_w * nrm
+                    if right_bound is None:
+                        right_bound = centerline - half_w * nrm
+
             edges = np.stack([centerline, left_bound, right_bound], axis=0)
 
             vec = edges[:, 1:] - edges[:, :-1]
@@ -661,12 +690,18 @@ class PlutoDataset(BaseDataset):
             )
             rec_polygon_position.append(centerline[0])
             rec_polygon_orientation.append(float(ori[0, 0]))
-            rec_polygon_type.append(int(self.polygon_types.index("LANE")))
+            # - MetaDriveType.LANE_SURFACE_STREET for ROADBLOCK interior edges (treat as LANE)
+            # - MetaDriveType.LANE_SURFACE_UNSTRUCTURE for ROADBLOCK_CONNECTOR interior edges (treat as LANE_CONNECTOR)
+            lane_type = str(lane.get('type', '')).upper()
+            if "LANE_SURFACE_UNSTRUCTURE" in lane_type:
+                rec_polygon_type.append(int(self.polygon_types.index("LANE_CONNECTOR")))
+            else:
+                rec_polygon_type.append(int(self.polygon_types.index("LANE")))
             rec_polygon_on_route.append(bool(str(map_id) in route_ids))
             rec_polygon_tl_status.append(int(tls.get(str(map_id), 0)))
             rec_polygon_has_speed_limit.append(False)
             rec_polygon_speed_limit.append(0.0)
-            rec_polygon_road_block_id.append(int(hash(str(map_id)) % (10**8)))
+            rec_polygon_road_block_id.append(int(map_id))
 
             kept_object_ids.append(map_id)
 
@@ -702,7 +737,7 @@ class PlutoDataset(BaseDataset):
             rec_polygon_tl_status.append(0)
             rec_polygon_has_speed_limit.append(False)
             rec_polygon_speed_limit.append(0.0)
-            rec_polygon_road_block_id.append(int(hash(str(map_id)) % (10**8)))
+            rec_polygon_road_block_id.append(int(map_id))
 
             kept_object_ids.append(map_id)
 
@@ -794,7 +829,6 @@ class PlutoDataset(BaseDataset):
             # candidates in front within lateral band
             cand = valid_now & (forward > 0.0) & (lateral < 3.5)
             if cand.any():
-                d = np.linalg.norm(rel, axis=1)
                 # sort by forward distance
                 order = np.argsort(forward + (~cand) * 1e6)
                 for j in order:
@@ -999,289 +1033,139 @@ class PlutoDataset(BaseDataset):
         ego_len = getattr(self, 'length', 5.0)
         return xy + ego_len * np.array([np.cos(angle), np.sin(angle)]) / 2
 
-    # def _get_reference_line_feature(
-    #     self,
-    #     ego_features: dict,
-    #     map_features_list: dict,
-    #     route_roadblock_ids=None,
-    #     radius: Optional[float] = None,
-    #     n_points: Optional[int] = None,
-    #     max_reference_lines: int = 12,
-    #     present_idx: Optional[int] = None,
-    # ):
-    #     """Build reference line candidates from SD map_features.
-    #
-    #     Output matches Pluto planning head expectations:
-    #       position: (R, P, 2)
-    #       vector: (R, P, 2)
-    #       orientation: (R, P)
-    #       valid_mask: (R, P)
-    #       future_projection: (R, 8, 2)  # [s_on_line(m), dist_to_line(m)]
-    #
-    #     Notes:
-    #       * No nuplan ScenarioManager is required.
-    #       * We use lane/lane_connector polylines as candidate reference lines.
-    #       * If route_roadblock_ids is provided, we prefer lanes on the route.
-    #     """
-    #
-    #     radius = float(radius if radius is not None else self.radius)
-    #     # Pluto builder uses 1m spacing: n_points = int(radius / 1.0)
-    #     n_points = int(n_points if n_points is not None else max(int(radius / 1.0), 1))
-    #
-    #     present_idx_use = present_idx if present_idx is not None else self.history_samples
-    #     ego_xy = np.asarray(ego_features["position"][present_idx_use], dtype=np.float64)[:2]
-    #     ego_heading = float(np.asarray(ego_features["heading"][present_idx_use]))
-    #
-    #     def _polyline_to_xyh(polyline: np.ndarray) -> np.ndarray:
-    #         arr = np.asarray(polyline)
-    #         if arr.ndim != 2 or arr.shape[0] < 2:
-    #             return np.zeros((0, 3), dtype=np.float64)
-    #         xy = arr[:, :2].astype(np.float64)
-    #         dxy = np.diff(xy, axis=0)
-    #         yaw = np.arctan2(dxy[:, 1], dxy[:, 0])
-    #         yaw = np.concatenate([yaw, yaw[-1:]], axis=0)
-    #         return np.concatenate([xy, yaw[:, None]], axis=-1)
-    #
-    #     # 1) collect candidate polylines
-    #     candidates: List[Tuple[float, np.ndarray]] = []  # (score, line_xyh)
-    #     on_route: List[Tuple[float, np.ndarray]] = []
-    #
-    #     route_set = set(int(x) for x in route_roadblock_ids) if route_roadblock_ids else None
-    #
-    #     for map_id, feat in (map_features_list or {}).items():
-    #         mtype = str(feat.get("type", "")).upper()
-    #         if not _is_lane_like(mtype): continue
-    #
-    #         line_xyh = _polyline_to_xyh(feat["polyline"])
-    #         if line_xyh.shape[0] < 2: continue
-    #
-    #         # distance score: min distance from ego to polyline vertices
-    #         d = np.linalg.norm(line_xyh[:, :2] - ego_xy[None, :], axis=-1).min()
-    #         if d > radius: continue
-    #
-    #         score = float(d)
-    #
-    #         is_on_route = False
-    #         if route_set is not None:
-    #             if int(map_id) in route_set: is_on_route = True
-    #
-    #         if is_on_route:
-    #             on_route.append((score, line_xyh))
-    #         else:
-    #             candidates.append((score, line_xyh))
-    #
-    #     # prefer on-route, then nearest
-    #     selected = sorted(on_route, key=lambda x: x[0]) + sorted(candidates, key=lambda x: x[0])
-    #     selected = selected[:max_reference_lines]
-    #
-    #     # 2) fallback: straight line along ego heading
-    #     if len(selected) == 0:
-    #         xs = ego_xy[0] + np.linspace(0.0, radius, n_points + 1) * np.cos(ego_heading)
-    #         ys = ego_xy[1] + np.linspace(0.0, radius, n_points + 1) * np.sin(ego_heading)
-    #         line_xyh = np.stack([xs, ys, np.full_like(xs, ego_heading)], axis=-1)
-    #         selected = [(0.0, line_xyh)]
-    #
-    #     R = len(selected)
-    #     P = n_points
-    #
-    #     position = np.zeros((R, P, 2), dtype=np.float64)
-    #     vector = np.zeros((R, P, 2), dtype=np.float64)
-    #     orientation = np.zeros((R, P), dtype=np.float64)
-    #     valid_mask = np.zeros((R, P), dtype=np.bool_)
-    #     future_projection = np.zeros((R, 8, 2), dtype=np.float64)
-    #
-    #     ego_future = np.asarray(ego_features["position"][present_idx + 1 :], dtype=np.float64)
-    #     if ego_future.ndim == 2 and ego_future.shape[-1] >= 2 and ego_future.shape[0] > 0:
-    #         # every 1s (dt=0.1 => step 10)
-    #         future_samples_xy = ego_future[9::10, :2]
-    #     else:
-    #         future_samples_xy = np.zeros((0, 2), dtype=np.float64)
-    #
-    #     for i, (_score, line_xyh) in enumerate(selected):
-    #         # resample to (P+1) points using arc-length interpolation
-    #         # line_xyh: (N,3). We interpolate on xy, then recompute yaw.
-    #         xy = line_xyh[:, :2]
-    #         if xy.shape[0] < 2: continue
-    #
-    #         xy_rs = interpolate_polyline(xy, P + 1).astype(np.float64)  # (P+1,2)
-    #         dxy = np.diff(xy_rs, axis=0)
-    #         yaw = np.arctan2(dxy[:, 1], dxy[:, 0])
-    #
-    #         position[i] = xy_rs[:-1]
-    #         vector[i] = dxy
-    #         orientation[i] = yaw
-    #         valid_mask[i] = True
-    #
-    #         if future_samples_xy.shape[0] > 0:
-    #             # Use shapely for (s, dist) projection like builder
-    #             ls = LineString(xy_rs)
-    #             for j in range(min(8, future_samples_xy.shape[0])):
-    #                 pt = Point(float(future_samples_xy[j, 0]), float(future_samples_xy[j, 1]))
-    #                 try:
-    #                     future_projection[i, j, 0] = float(ls.project(pt))
-    #                     future_projection[i, j, 1] = float(ls.distance(pt))
-    #                 except Exception:
-    #                     # leave zeros on any numerical issues
-    #                     pass
-    #     return {
-    #         "position": position,
-    #         "vector": vector,
-    #         "orientation": orientation,
-    #         "valid_mask": valid_mask,
-    #         "future_projection": future_projection,
-    #     }
-
 
     def _get_reference_line_feature(
         self,
         ego_features,
         map_features_list,
         route_roadblock_ids=None,
-        training=True,
+        lane_graph=None,
+        training=False,
     ):
-        ego_pos = ego_features["position"][self.history_samples]
-        ego_heading = ego_features["heading"][self.history_samples]
+        ego_pos = ego_features["position"][-1]
+        ego_heading = ego_features["heading"][-1]
 
         radius = self.radius
 
-        # route_roadblock_ids is the whole-scenario route id sequence (provided by get_route_roadblock_ids).
-        # We trim to only keep ids from ego current position onward.
-        route_roadblock_ids = route_roadblock_ids or []
-        route_seq = [int(x) for x in route_roadblock_ids]
+        # route_roadblock_ids here is actually route lane-id sequence (forward ordered).
+        route_seq = [int(x) for x in (route_roadblock_ids or [])]
 
-        # 1. 提取 lane segments
-        lanes = []
-        for map_id, feat in map_features_list.items():
-            t = str(feat.get("type", "")).upper()
-            if "LANE" not in t:
-                continue
-            poly = feat.get("polyline", None)
-            if poly is None or len(poly) < 2:
-                continue
-            poly = np.asarray(poly)
-
-            # Limit lane extraction to within `radius` of ego to avoid excessive computation.
-            # Use minimum distance to polyline points as an inexpensive filter.
-            try:
-                min_dist = np.min(np.linalg.norm(poly[:, :2] - ego_pos[None, :2], axis=1))
-            except Exception:
-                continue
-            if min_dist > radius:
-                continue
-            start = poly[0, :2]
-            end = poly[-1, :2]
-
-            def compute_heading(p1, p2):
-                vec = p2 - p1
-                return np.arctan2(vec[1], vec[0])
-            heading_start = compute_heading(poly[0, :2], poly[1, :2])
-            heading_end = compute_heading(poly[-2, :2], poly[-1, :2])
-
-            lanes.append({
-                "poly": poly,
-                "start": start,
-                "end": end,
-                "heading_start": heading_start,
-                "heading_end": heading_end,
-                # treat map_id as route_id/roadblock_id (same assumption as get_route_roadblock_ids)
-                "route_id": int(map_id) if str(map_id).isdigit() else (hash(str(map_id)) % (10**8)),
-            })
-
-        # =========================
-        # 2. 构建伪 graph（lane stitching）
-        # =========================
         def wrap_to_pi(angle):
             return (angle + np.pi) % (2 * np.pi) - np.pi
-        adj = {i: [] for i in range(len(lanes))}
 
-        for i, A in enumerate(lanes):
-            for j, B in enumerate(lanes):
-                if i == j:
+        # Build a working lane set within radius to avoid excessive computation.
+        # If route is available, restrict to route lanes (plus a small neighbor set) to reduce branching.
+        lane_ids = []
+        lane_polys = {}
+        lane_xyz = {}
+        from typing import Set
+        neighbor_extra: Set[int] = set()
+
+        if route_seq:
+            # Expand route_set with immediate left/right neighbors to tolerate minor map mismatches.
+            for lid in route_seq:
+                node = lane_graph.lanes.get(lid)
+                if node is None:
                     continue
+                neighbor_extra.update(node.left_neighbors)
+                neighbor_extra.update(node.right_neighbors)
 
-                dist = np.linalg.norm(A["end"] - B["start"])
-                heading_diff = abs(wrap_to_pi(A["heading_end"] - B["heading_start"]))
+        allowed_lanes = None
+        if route_seq:
+            # Keep a deterministic iteration order to avoid subtle randomness in candidate selection.
+            # We prioritize lanes on the forward route sequence, then add nearby neighbor lanes.
+            allowed_lanes = set(route_seq) | neighbor_extra
+            allowed_lanes_ordered = []
+            seen = set()
+            for lid in route_seq:
+                if lid in allowed_lanes and lid not in seen:
+                    allowed_lanes_ordered.append(lid)
+                    seen.add(lid)
+            for lid in sorted(allowed_lanes):
+                if lid not in seen:
+                    allowed_lanes_ordered.append(lid)
+                    seen.add(lid)
+        else:
+            allowed_lanes_ordered = None
 
-                if dist < 3.0 and heading_diff < 0.52:  # ≈30°
-                    adj[i].append(j)
-
-        # =========================
-        # 3. 找 ego 所在 lane（过滤对向）
-        # =========================
-        def point_to_polyline_distance(point, polyline):
-            return np.min(np.linalg.norm(polyline[:, :2] - point[None, :], axis=1))
-
-        # candidates = []
-        # ego_dir = np.array([np.cos(ego_heading), np.sin(ego_heading)])
-        # for i, lane in enumerate(lanes):
-        #     poly = lane["poly"]
-        #     dist = point_to_polyline_distance(ego_pos, poly)
-        #     heading_diff = abs(wrap_to_pi(lane["heading_start"] - ego_heading))
-        #     # forward check
-        #     vec = poly[0, :2] - ego_pos
-        #     forward = np.dot(vec, ego_dir)
-        #     if dist < 5.0 and heading_diff < 0.78 and forward > -2.0:  # 45°
-        #         candidates.append((i, dist))
-
-        candidates = []
-        ego_dir = np.array([np.cos(ego_heading), np.sin(ego_heading)], dtype=np.float64)
-        # 可调阈值：先放宽一点，避免 candidates 为空导致 fallback
-        DIST_TH = 8.0  # 原来 5.0，点集距离不准时容易误杀
-        HEADING_TH = 1.05  # 约 60°，路口/弯道更稳；原来 45°(0.78)
-        FORWARD_TH = -2.0  # 仍保留“允许在身后 2m 内”的宽容
-        for i, lane in enumerate(lanes):
-            poly = np.asarray(lane["poly"])
-            if poly is None or len(poly) < 2:
+        # Prefer direct lookup in allowed_lanes (route corridor) to avoid scanning the whole lane graph.
+        # Fall back to full scan only when route is unavailable.
+        iter_lids = allowed_lanes_ordered if allowed_lanes_ordered is not None else list(lane_graph.lanes.keys())
+        for lid in iter_lids:
+            node = lane_graph.lanes.get(lid)
+            if node is None:
                 continue
-            # 1) 用“点到点集最小距离”作为粗dist（保留你原来的轻量实现）
-            #    如果你愿意更准，可用 shapely LineString(poly[:,:2]).distance(Point(...))
-            dists = np.linalg.norm(poly[:, :2] - ego_pos[None, :2], axis=1)
-            k = int(np.argmin(dists))  # poly 上离 ego 最近的点索引
-            dist = float(dists[k])
+            cl = node.centerline
+            if cl is None or len(cl) < 2:
+                continue
+            # quick radius filter by nearest centerline point
+            min_dist = float(np.min(np.linalg.norm(cl - ego_pos[None, :2], axis=1)))
+            if min_dist > radius:
+                continue
+            lane_ids.append(lid)
+            lane_polys[lid] = cl
+            lane_xyz[lid] = node
 
+        # Find candidate start lanes near ego, aligned with ego heading and in front.
+        candidates: List[Tuple[int, float]] = []
+        ego_dir = np.array([np.cos(ego_heading), np.sin(ego_heading)], dtype=np.float64)
+        DIST_TH = 8.0
+        HEADING_TH = 1.05
+        FORWARD_TH = -2.0
+
+        for lid in lane_ids:
+            poly = lane_polys[lid]
+            dists = np.linalg.norm(poly - ego_pos[None, :2], axis=1)
+            k = int(np.argmin(dists))
+            dist = float(dists[k])
             if dist > DIST_TH:
                 continue
-            # 2) 用最近点附近的局部切向估计 lane 朝向（避免用 poly[0] 造成误杀）
-            #    取 k 的前后点做差，避免 k 在边界时越界
+            # local tangent
             if k == 0:
-                p0 = poly[0, :2]
-                p1 = poly[1, :2]
+                p0, p1 = poly[0], poly[1]
             elif k >= len(poly) - 1:
-                p0 = poly[-2, :2]
-                p1 = poly[-1, :2]
+                p0, p1 = poly[-2], poly[-1]
             else:
-                p0 = poly[k - 1, :2]
-                p1 = poly[k + 1, :2]
+                p0, p1 = poly[k - 1], poly[k + 1]
             traj_vec = (p1 - p0).astype(np.float64)
-            traj_norm = float(np.linalg.norm(traj_vec))
-            if traj_norm < 1e-3:
-                # 局部退化，跳过
+            n = float(np.linalg.norm(traj_vec))
+            if n < 1e-3:
                 continue
-            traj_dir = traj_vec / traj_norm
-            traj_heading = float(np.arctan2(traj_dir[1], traj_dir[0]))
+            traj_heading = float(np.arctan2(traj_vec[1], traj_vec[0]))
             heading_diff = abs(wrap_to_pi(traj_heading - ego_heading))
             if heading_diff > HEADING_TH:
                 continue
-            # 3) forward 判定也用“最近点”而不是 poly[0]
-            vec_near = (poly[k, :2] - ego_pos[:2]).astype(np.float64)
+            vec_near = (poly[k] - ego_pos[:2]).astype(np.float64)
             forward = float(np.dot(vec_near, ego_dir))
             if forward <= FORWARD_TH:
                 continue
-            candidates.append((i, dist))
+            candidates.append((lid, dist))
 
-        # Determine ego current route_id from the lane candidates that ego lies on.
-        # Then trim the whole-scenario route_seq to start from that route_id.
-        if route_seq:
-            cur_route_candidates = [lanes[i]["route_id"] for i, _ in candidates] if 'candidates' in locals() else []
+        # Trim route_seq to only keep lane ids from ego current lane onward.
+        if route_seq and candidates:
             start_idx = None
-            for rid in cur_route_candidates:
-                if rid in route_seq:
-                    start_idx = route_seq.index(rid)
+            for lid, _ in sorted(candidates, key=lambda x: x[1]):
+                if lid in route_seq:
+                    start_idx = route_seq.index(lid)
                     break
+            # ======== 👇 解决隐患3 start_idx is None的新增代码 👇 ========
+            if start_idx is None:
+                best_dist = float('inf')
+                best_idx = 0
+                for i, r_lid in enumerate(route_seq):
+                    # 找到目前 route_seq 里离主车最近的车道
+                    node = lane_graph.lanes.get(r_lid)
+                    if node and node.centerline is not None and len(node.centerline) > 0:
+                        dist = float(np.min(np.linalg.norm(node.centerline - ego_pos[None, :2], axis=1)))
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_idx = i
+                start_idx = best_idx
+            # ======== 👆 新增代码结束 👆 ========
             if start_idx is not None:
                 route_seq = route_seq[start_idx:]
+        route_set = set(route_seq)
 
-        # fallback：如果没有候选
         if len(candidates) == 0:
             print('—————————————— Warning,参考线为直线————————————')
             xs = ego_pos[0] + np.linspace(0, radius, int(radius)) * np.cos(ego_heading)
@@ -1290,70 +1174,167 @@ class PlutoDataset(BaseDataset):
             reference_lines = [fake_line]
             reference_line_route_ids = [route_seq[0] if route_seq else -1]
         else:
-            # 选最近的几个
-            candidates = sorted(candidates, key=lambda x: x[1])[:3]
-            start_indices = [c[0] for c in candidates]
+            # choose nearest few as starting points
+            # If route is available, prefer start lanes that are exactly on route.
+            cand_sorted = sorted(candidates, key=lambda x: x[1])
+            start_lanes_on_route = [lid for lid, _ in cand_sorted if (not route_seq) or (lid in route_set)]
+            start_lanes = start_lanes_on_route[:6] if start_lanes_on_route else [lid for lid, _ in cand_sorted[:6]]
 
-            # =========================
-            # 4. DFS rollout paths
-            # =========================
-            def lane_length(idx):
-                poly = lanes[idx]["poly"]
-                return np.sum(np.linalg.norm(np.diff(poly[:, :2], axis=0), axis=1))
+            # Add immediate left/right neighbors to increase candidate diversity (parallel lanes).
+            # Keep it bounded to avoid combinatorial explosion.
+            extra_starts = []
+            for lid in list(start_lanes):
+                node = lane_graph.lanes.get(lid)
+                if node is None:
+                    continue
+                for nb in (node.left_neighbors + node.right_neighbors):
+                    if allowed_lanes is not None and nb not in allowed_lanes:
+                        continue
+                    extra_starts.append(nb)
+            # unique preserve order
+            seen = set(start_lanes)
+            for nb in extra_starts:
+                if nb not in seen:
+                    start_lanes.append(nb)
+                    seen.add(nb)
+                if len(start_lanes) >= 12:
+                    break
 
-            def expand_path(start_idx):
-                paths = []
+            def lane_length_xy(poly_xy: np.ndarray) -> float:
+                return float(np.sum(np.linalg.norm(np.diff(poly_xy, axis=0), axis=1)))
 
-                def dfs(path, length):
-                    cur = path[-1]
+            # DFS along exit_lanes topology
+            all_paths: List[List[int]] = []
 
-                    if length > radius:
-                        paths.append(path)
-                        return
+            # Build a quick route index for successor priority.
+            route_index = {lid: i for i, lid in enumerate(route_seq)} if route_seq else {}
 
-                    if len(adj[cur]) == 0:
-                        paths.append(path)
-                        return
+            def _ordered_successors(cur: int) -> List[int]:
+                succs = [s for s in lane_graph.successors(cur) if s in lane_graph.lanes]
+                if not succs:
+                    return []
+                if not route_seq or cur not in route_index:
+                    return succs
+                i = route_index[cur]
+                preferred = route_seq[i + 1] if i + 1 < len(route_seq) else None
+                if preferred is not None and preferred in succs:
+                    # Put the route successor first, keep others as alternatives.
+                    others = [s for s in succs if s != preferred]
+                    return [preferred] + others
+                return succs
 
-                    for nxt in adj[cur]:
-                        if nxt in path:  # avoid loop
+            def dfs(path: List[int], acc_len: float, offroute_budget: int):
+                cur = path[-1]
+                if acc_len >= radius:
+                    all_paths.append(path)
+                    return
+                succs = _ordered_successors(cur)
+                if not succs:
+                    all_paths.append(path)
+                    return
+                expanded = False
+                for nxt in succs:
+                    if nxt in path:
+                        continue
+                    # If route is available, strongly prefer staying on route; allow a very limited number
+                    # of off-route alternatives (e.g., neighbor lane) to avoid empty expansions.
+                    if route_seq and nxt not in route_set:
+                        # allow neighbor lanes only
+                        allow_offroute = (nxt in neighbor_extra) and (offroute_budget > 0)
+                        if not allow_offroute:
                             continue
-                        dfs(path + [nxt], length + lane_length(nxt))
+                    poly_xy = lane_graph.lanes[nxt].centerline
+                    if poly_xy is None or len(poly_xy) < 2:
+                        continue
+                    # keep within radius by endpoint proximity
+                    if float(np.min(np.linalg.norm(poly_xy - ego_pos[None, :2], axis=1))) > radius * 1.2:
+                        continue
+                    expanded = True
+                    next_budget = offroute_budget
+                    if route_seq and (nxt not in route_set) and (nxt not in neighbor_extra):
+                        next_budget -= 1
+                    dfs(path + [nxt], acc_len + lane_length_xy(poly_xy), next_budget)
+                if not expanded:
+                    all_paths.append(path)
 
-                dfs([start_idx], 0)
-                return paths
+            for lid in start_lanes:
+                # if route_seq exists, we can require start lane in trimmed route.
+                if route_seq and lid not in route_set:
+                    continue
+                poly_xy = lane_graph.lanes[lid].centerline
+                if poly_xy is None or len(poly_xy) < 2:
+                    continue
+                dfs([lid], lane_length_xy(poly_xy), offroute_budget=1)
 
-            all_paths = []
-            for s in start_indices:
-                all_paths.extend(expand_path(s))
-
-            # =========================
-            # 5. merge polyline
-            # =========================
-            def merge_path(path):
-                merged = []
-                for idx in path:
-                    poly = lanes[idx]["poly"]
-                    if len(merged) > 0:
-                        poly = poly[1:]
-                    merged.append(poly)
-                return np.concatenate(merged, axis=0)
-
-            # Filter out paths that start with a route_id behind ego (not in trimmed route_seq).
+            # Merge lane centerlines into continuous polylines. Preserve original heading from polyline if present.
             reference_lines = []
             reference_line_route_ids = []
-            route_set = set(route_seq)
-            for p in all_paths:
-                start_rid = lanes[p[0]]["route_id"]
-                if route_seq and start_rid not in route_set:
-                    continue
-                reference_lines.append(merge_path(p))
-                reference_line_route_ids.append(start_rid)
 
-            # If everything got filtered, fall back to unfiltered paths (but still output route ids).
+            def _dedup_append(lines: List[np.ndarray], ids: List[int], line: np.ndarray, route_id: int, eps: float = 1.0) -> None:
+                """Append line if it's not covered by existing ones. Remove existing ones covered by this line."""
+                if line is None or len(line) < 2:
+                    return
+                to_remove = []
+                for i, ex in enumerate(lines):
+                    diff = line[:, None, :2] - ex[None, :, :2]
+                    dists = np.linalg.norm(diff, axis=-1)
+
+                    dist_line_to_ex = np.max(np.min(dists, axis=1))
+                    dist_ex_to_line = np.max(np.min(dists, axis=0))
+
+                    if dist_line_to_ex < eps:
+                        # 'line' is completely covered by 'ex' (within eps), so it provides no new path info
+                        return
+
+                    if dist_ex_to_line < eps:
+                        # 'ex' is completely covered by 'line', mark 'ex' for replacement
+                        to_remove.append(i)
+
+                # Pop out in reverse to maintain indices
+                for i in reversed(to_remove):
+                    lines.pop(i)
+                    ids.pop(i)
+
+                lines.append(line)
+                ids.append(route_id)
+
+            for path in all_paths:
+                merged = []
+                for idx, lid in enumerate(path):
+                    # We still have original polyline with heading in map_features_list.
+                    raw = map_features_list.get(str(lid), None)
+                    poly = None
+                    if isinstance(raw, dict):
+                        poly = raw.get('polyline', None)
+                    if poly is None:
+                        # fallback to xy-only centerline
+                        poly_xy = lane_graph.lanes[lid].centerline
+                        diff_y = np.diff(poly_xy[:, 1])
+                        diff_x = np.diff(poly_xy[:, 0])
+                        seg_hdg = np.arctan2(diff_y, diff_x)
+                        heading = np.pad(seg_hdg, (1, 0), mode='edge')
+                        poly = np.concatenate([poly_xy, heading[:, None]], axis=1)
+                    poly = np.asarray(poly)
+                    if idx > 0 and len(poly) > 1:
+                        poly = poly[1:]
+                    merged.append(poly)
+                if not merged:
+                    continue
+                line = np.concatenate(merged, axis=0)
+                _dedup_append(reference_lines, reference_line_route_ids, line, int(path[0]))
+
+                # Cap number of reference lines to keep tensors bounded
+                if len(reference_lines) >= 12:
+                    break
+
             if len(reference_lines) == 0:
-                reference_lines = [merge_path(p) for p in all_paths]
-                reference_line_route_ids = [lanes[p[0]]["route_id"] for p in all_paths]
+                # Last resort: allow unfiltered expansion (ignore route_set)
+                for lid in start_lanes:
+                    poly = map_features_list.get(str(lid), {}).get('polyline', None)
+                    if poly is None:
+                        continue
+                    reference_lines.append(np.asarray(poly))
+                    reference_line_route_ids.append(int(lid))
 
         # =========================
         # 6. 转成 feature tensor
@@ -1373,19 +1354,14 @@ class PlutoDataset(BaseDataset):
         if 'reference_line_route_ids' in locals() and len(reference_line_route_ids) == M:
             route_id[:] = np.asarray(reference_line_route_ids, dtype=np.int64)
 
-        # future（仅训练用）
-        if training:
-            ego_future = ego_features["position"][self.history_samples + 1:]
-            if len(ego_future) > 0:
-                future_samples = ego_future[9::10]  # 1Hz
-                future_samples = [Point(xy) for xy in future_samples]
-        else:
-            ego_future = []
+        future_samples = []
+        ego_future = ego_features["position"][self.history_samples + 1:]
+        if len(ego_future) > 0:
+            future_samples = ego_future[9::10]  # 1Hz
+            future_samples = [Point(xy) for xy in future_samples]
 
         for i, line in enumerate(reference_lines):
             line = np.asarray(line)
-
-            # subsample
             subsample = line[::4][: n_points + 1]
             n_valid = len(subsample)
 
@@ -1399,11 +1375,17 @@ class PlutoDataset(BaseDataset):
                     vector[i, : n_valid - 1, 1],
                     vector[i, : n_valid - 1, 0],
                 )
-
             valid_mask[i, : n_valid - 1] = True
 
-            # future projection（训练用）
-            if training and len(ego_future) > 0:
+            # =========================
+            # Pad the rest with the last valid point to prevent bent lines
+            # =========================
+            if n_valid - 1 > 0 and n_valid - 1 < n_points:
+                position[i, n_valid - 1:] = position[i, n_valid - 2]
+                vector[i, n_valid - 1:] = vector[i, n_valid - 2]
+                orientation[i, n_valid - 1:] = orientation[i, n_valid - 2]
+
+            if len(ego_future) > 0:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     linestring = LineString(line[:, :2])
@@ -1418,5 +1400,5 @@ class PlutoDataset(BaseDataset):
             "orientation": orientation,
             "valid_mask": valid_mask,
             "future_projection": future_projection,
-            "route_id": route_id,
+            # "route_id": route_id,
         }

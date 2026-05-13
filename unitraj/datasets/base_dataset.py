@@ -35,7 +35,9 @@ class BaseDataset(Dataset):
         self.config = config
         self.data_loaded_memory = []
         self.file_cache = {}
-        self.load_data()
+        skip_load_data = config.get('skip_load_data', False)
+        if not skip_load_data:
+            self.load_data()
 
     def load_data(self):
         self.data_loaded = {}

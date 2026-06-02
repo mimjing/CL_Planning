@@ -10,10 +10,10 @@
 [**Paper**](waiting)
 
 
-💡UniTraj allows users to train and evaluate trajectory prediction models from real-world datasets like Waymo, nuPlan,
+💡CL_Planning allows users to train and evaluate trajectory prediction models from real-world datasets like Waymo, nuPlan,
 nuScenes and Argoverse2 in a unified pipeline.
 
-![system](docs/assets/framework.png)
+![system](docs/assets/framework.jpg)
 
 🔥Powered by [Hydra](https://hydra.cc/docs/intro/), [Pytorch-lightinig](https://lightning.ai/docs/pytorch/stable/),
 and [WandB](https://wandb.ai/site), the framework is easy to configure, train and log.

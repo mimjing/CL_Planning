@@ -1,6 +1,3 @@
-<div style="text-align: center;">
-  <img src="https://github.com/vita-epfl/UniTraj/blob/main/docs/assets/unitraj.gif" alt="Demo" width="300">
-</div>
 
 # CL_Planning: A Unified and Extensible Framework for Closed-Loop Evaluation of Vehicle Trajectory Planning
 

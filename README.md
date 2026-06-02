@@ -2,12 +2,12 @@
   <img src="https://github.com/vita-epfl/UniTraj/blob/main/docs/assets/unitraj.gif" alt="Demo" width="300">
 </div>
 
-# UniTraj: A Unified Framework for Scalable Vehicle Trajectory Prediction
+# CL_Planning: A Unified and Extensible Framework for Closed-Loop Evaluation of Vehicle Trajectory Planning
 
 [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/unitraj-a-unified-framework-for-scalable/trajectory-prediction-on-nuscenes)](https://paperswithcode.com/sota/trajectory-prediction-on-nuscenes?p=unitraj-a-unified-framework-for-scalable)
 
-[**Website**](https://vita-epfl.github.io/UniTraj/) |
-[**Paper**](https://arxiv.org/pdf/2403.15098.pdf)
+[**Website**](waiting) |
+[**Paper**](waiting)
 
 
 💡UniTraj allows users to train and evaluate trajectory prediction models from real-world datasets like Waymo, nuPlan,
@@ -19,22 +19,6 @@ nuScenes and Argoverse2 in a unified pipeline.
 and [WandB](https://wandb.ai/site), the framework is easy to configure, train and log.
 
 ![system](docs/assets/support.png)
-
-## 📰 News & Updates
-
-### May. 2025
-
-- 🔥 UniTraj now supports sim agents! See more details there: [SMART](https://github.com/vita-epfl/UniTraj/tree/main/unitraj/models/smart)
-
-### Dec. 2024
-- 🔥 UniTraj now supports data selection with [TAROT](https://github.com/vita-epfl/TAROT)! Try to use less data for improved performance.
-
-### Nov. 2024
-- Adding AV2 evaluation tools.
-- Using h5 format data cache for faster loader.
-
-### Sep. 2024
-- New website is live! Check it out [here](https://vita-epfl.github.io/UniTraj/).
 
 
 
@@ -124,13 +108,9 @@ Please refer to config.yaml and method/autobot.yaml for more details.
 ### 3. Evaluation
 
 1. In config.yaml, set the `ckpt_path` to the path of the trained model and `val_data_path` to the validation data path.
-2. (Optional) In config.yaml, set eval_waymo or eval_nuscenes to True if you want to evaluate the model with Waymo or
-   nuScenes official evaluation tool. (Install waymo-open-dataset and nuscenes-devkit first)
-3. Run```python evaluation.py```
+2. (Optional) In config.yaml, set closeloop_mode to True 
+3. Run```python closeloop_sim.py```
 
-### 4. Dataset Analysis
-
-```python data_analysis.py```
 
 ## Contribute to UniTraj
 
@@ -219,13 +199,5 @@ Please refer to config.yaml and method/autobot.yaml for more details.
 
 ---
 
-### For citation:
 
-```
-@article{feng2024unitraj,
-  title={UniTraj: A Unified Framework for Scalable Vehicle Trajectory Prediction},
-  author={Feng, Lan and Bahari, Mohammadhossein and Amor, Kaouther Messaoud Ben and Zablocki, {\'E}loi and Cord, Matthieu and Alahi, Alexandre},
-  journal={arXiv preprint arXiv:2403.15098},
-  year={2024}
-}
 
